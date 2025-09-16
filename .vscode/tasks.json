@@ -1,0 +1,28 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "npm",
+			"script": "watch",
+			"problemMatcher": [
+				"$tsc-watch"
+			],
+			"isBackground": true,
+			"label": "npm: watch"
+		},
+		{
+			"type": "npm",
+			"script": "compile",
+			"problemMatcher": [
+				"$tsc"
+			],
+			"label": "npm: compile"
+		},
+		{
+			"label": "Echo Ready",
+			"type": "shell",
+			"command": "echo Project tasks ready",
+			"group": "build"
+		}
+	]
+}

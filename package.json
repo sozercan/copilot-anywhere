@@ -1,0 +1,107 @@
+{
+  "name": "copilot-anywhere",
+  "displayName": "Copilot Anywhere",
+  "description": "Bridge GitHub Copilot Chat with external clients via HTTP & SSE (real-time proxy).",
+  "version": "0.0.1",
+  "publisher": "your-publisher-id",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onChatParticipant:copilot-anywhere.proxy"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilotAnywhere.sendTest",
+        "title": "Copilot Anywhere: Send Test Message"
+      }
+    ],
+    "configuration": {
+      "title": "Copilot Anywhere",
+      "properties": {
+        "copilotAnywhere.server.port": {
+          "type": "number",
+            "default": 3939,
+            "description": "Port for the local HTTP/SSE server that external clients connect to."
+        },
+        "copilotAnywhere.server.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host interface for the local HTTP/SSE server. Use 0.0.0.0 to accept external connections."
+        },
+        "copilotAnywhere.security.allowOrigins": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": ["*"] ,
+          "description": "Allowed Origins for CORS (array of origin strings). Use * for all (dev only)."
+        },
+        "copilotAnywhere.http.autoInvoke": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically invoke the Copilot model for prompts received via HTTP /message."
+        },
+        "copilotAnywhere.http.injectIntoChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject HTTP prompts directly into the Copilot Chat input (as @CopilotAnywhere <prompt>) instead of auto invoking."
+        },
+        "copilotAnywhere.http.autoSubmit": {
+          "type": "boolean",
+          "default": true,
+          "description": "When injecting into chat, automatically submit the prompt after insertion."
+        },
+        "copilotAnywhere.agent.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable internal autonomous agent loop that can read and write files via structured tool calls."
+        },
+        "copilotAnywhere.agent.maxSteps": {
+          "type": "number",
+          "default": 12,
+          "description": "Maximum iterative reasoning/tool steps per agent run."
+        },
+        "copilotAnywhere.agent.allowedRoots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["*"],
+          "description": "File or directory roots the agent is allowed to access/edit."
+        },
+        "copilotAnywhere.agent.requireApproval": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, prompt for user approval before applying each file edit."
+        },
+        "copilotAnywhere.agent.prefix": {
+          "type": "string",
+          "default": "agent:",
+          "description": "If a chat prompt to @CopilotAnywhere starts with this prefix, it will invoke the autonomous agent loop instead of a single model response."
+        }
+      }
+    },
+    "chatParticipants": [
+      {
+        "id": "copilot-anywhere.proxy",
+        "name": "CopilotAnywhere",
+        "isSticky": true,
+        "fullName": "Copilot Anywhere Agent Proxy"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "echo 'No linter configured'"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.4.0",
+    "vsce": "^2.15.0",
+    "@types/vscode": "^1.93.0"
+  }
+}

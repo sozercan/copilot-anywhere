@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Copilot Anywhere</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background:#0f1115; color:#edf2f7; }
+header { font-size: 1.25rem; margin-bottom: 1rem; }
+#inputRow { display:flex; gap:.5rem; margin-bottom:1rem; }
+#prompt { flex:1; padding:.5rem .75rem; font-size:1rem; border-radius:6px; border:1px solid #2d3748; background:#1a202c; color:#f7fafc; }
+button { padding:.6rem 1rem; background:#3182ce; border:none; color:#fff; border-radius:6px; cursor:pointer; font-weight:600; }
+button:disabled { opacity:.5; cursor: not-allowed; }
+#log { white-space: pre-wrap; background:#1a202c; padding:1rem; border-radius:8px; min-height:260px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow:auto; }
+.tag { display:inline-block; background:#2d3748; padding:2px 6px; margin-right:6px; border-radius:4px; font-size:.75rem; color:#a0aec0; }
+.fragment { color:#63b3ed; }
+.inbound { color:#cbd5e0; }
+.done { color:#9ae6b4; }
+.model { color:#f6ad55; }
+</style>
+</head>
+<body>
+<header>Copilot Anywhere Web Client</header>
+<div id="inputRow">
+  <input id="prompt" placeholder="Ask anything (Enter to send)" />
+  <button id="sendBtn">Send</button>
+</div>
+<div id="log" aria-live="polite"></div>
+<script>
+const host = location.origin; // assumes served from root
+const logEl = document.getElementById('log');
+const promptEl = document.getElementById('prompt');
+const sendBtn = document.getElementById('sendBtn');
+
+function append(type, text, extra={}) {
+  const line = document.createElement('div');
+  line.className = type;
+  const badge = document.createElement('span');
+  badge.className = 'tag';
+  badge.textContent = type.toUpperCase();
+  line.appendChild(badge);
+  if (extra.model) {
+    const m = document.createElement('span');
+    m.className='tag model';
+    m.textContent = extra.model;
+    line.appendChild(m);
+  }
+  const span = document.createElement('span');
+  span.textContent = text;
+  line.appendChild(span);
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function sendPrompt() {
+  const value = promptEl.value.trim();
+  if (!value) return;
+  sendBtn.disabled = true;
+  append('outgoing', value);
+  try {
+    const res = await fetch(host + '/message', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text: value }) });
+    if (!res.ok) {
+      const t = await res.text();
+      append('error', 'HTTP error: '+t);
+    } else {
+      const data = await res.json();
+      append('info', 'Sent id='+data.id);
+    }
+  } catch (e) {
+    append('error', 'Network error '+e);
+  } finally {
+    sendBtn.disabled = false;
+    promptEl.value='';
+    promptEl.focus();
+  }
+}
+
+sendBtn.addEventListener('click', sendPrompt);
+promptEl.addEventListener('keydown', e => { if (e.key==='Enter') sendPrompt(); });
+
+// SSE
+const es = new EventSource(host + '/events');
+es.addEventListener('inbound', ev => {
+  const data = JSON.parse(ev.data);
+  append('inbound', data.text, { id: data.id });
+});
+let buffer = {};
+es.addEventListener('fragment', ev => {
+  const data = JSON.parse(ev.data);
+  if (!buffer[data.id]) buffer[data.id] = '';
+  buffer[data.id] += data.fragment;
+  append('fragment', data.fragment, { id: data.id, model: data.model });
+});
+es.addEventListener('done', ev => {
+  const data = JSON.parse(ev.data);
+  append('done', 'Complete for id='+data.id+' (model '+data.model+')');
+  if (buffer[data.id]) {
+    append('answer', buffer[data.id]);
+  }
+});
+</script>
+</body>
+</html>
