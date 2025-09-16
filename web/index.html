@@ -20,14 +20,29 @@ button:disabled { opacity:.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
-<header>Copilot Anywhere Web Client</header>
-<div id="inputRow">
-  <input id="prompt" placeholder="Ask anything (Enter to send)" />
-  <button id="sendBtn">Send</button>
+<header style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
+  <span>Copilot Anywhere Web Client</span>
+  <button id="enableNotifyBtn" style="background:#4a5568; font-size:.7rem; padding:.4rem .6rem;">Enable Notifications</button>
+</header>
+<div style="display:flex; gap:1rem; flex-wrap:wrap; align-items:flex-start;">
+  <div style="min-width:220px; flex:0 0 220px;">
+    <h3 style="margin:0 0 .5rem; font-size:.9rem; letter-spacing:.05em; color:#a0aec0;">Projects</h3>
+    <div id="sessions" style="background:#1a202c; padding:.5rem; border-radius:6px; max-height:300px; overflow:auto;"></div>
+  </div>
+  <div style="flex:1; min-width:320px;">
+    <div id="inputRow">
+      <input id="prompt" placeholder="Ask anything (Enter to send)" />
+      <button id="sendBtn">Send</button>
+    </div>
+    <div id="activeSessionLabel" style="font-size:.75rem; color:#a0aec0; margin-bottom:.4rem;">No session selected</div>
+    <div id="log" aria-live="polite"></div>
+  </div>
 </div>
-<div id="log" aria-live="polite"></div>
 <script>
 const host = location.origin; // assumes served from root
+let sessionNameMap = {}; // id -> name
+let currentSession = null; // session id
+let sessionEventSource = null;
 const logEl = document.getElementById('log');
 const promptEl = document.getElementById('prompt');
 const sendBtn = document.getElementById('sendBtn');
@@ -58,7 +73,9 @@ async function sendPrompt() {
   sendBtn.disabled = true;
   append('outgoing', value);
   try {
-    const res = await fetch(host + '/message', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text: value }) });
+    const payload = { text: value };
+    if (currentSession) payload.sessionId = currentSession;
+    const res = await fetch(host + '/message', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     if (!res.ok) {
       const t = await res.text();
       append('error', 'HTTP error: '+t);
@@ -78,26 +95,89 @@ async function sendPrompt() {
 sendBtn.addEventListener('click', sendPrompt);
 promptEl.addEventListener('keydown', e => { if (e.key==='Enter') sendPrompt(); });
 
-// SSE
-const es = new EventSource(host + '/events');
-es.addEventListener('inbound', ev => {
-  const data = JSON.parse(ev.data);
-  append('inbound', data.text, { id: data.id });
-});
-let buffer = {};
-es.addEventListener('fragment', ev => {
-  const data = JSON.parse(ev.data);
-  if (!buffer[data.id]) buffer[data.id] = '';
-  buffer[data.id] += data.fragment;
-  append('fragment', data.fragment, { id: data.id, model: data.model });
-});
-es.addEventListener('done', ev => {
-  const data = JSON.parse(ev.data);
-  append('done', 'Complete for id='+data.id+' (model '+data.model+')');
-  if (buffer[data.id]) {
-    append('answer', buffer[data.id]);
+function connectSessionStream() {
+  if (sessionEventSource) { sessionEventSource.close(); }
+  const url = currentSession ? `${host}/events?session=${encodeURIComponent(currentSession)}` : `${host}/events`;
+  sessionEventSource = new EventSource(url);
+  const buffer = {};
+  sessionEventSource.addEventListener('inbound', ev => {
+    const data = JSON.parse(ev.data);
+    append('inbound', data.text, { id: data.id });
+  });
+  sessionEventSource.addEventListener('fragment', ev => {
+    const data = JSON.parse(ev.data);
+    if (!buffer[data.id]) buffer[data.id] = '';
+    buffer[data.id] += data.fragment;
+    append('fragment', data.fragment, { id: data.id, model: data.model });
+  });
+  sessionEventSource.addEventListener('done', ev => {
+    const data = JSON.parse(ev.data);
+    append('done', 'Complete for id='+data.id+' (model '+data.model+')');
+    if (buffer[data.id]) {
+      const answerText = buffer[data.id];
+      append('answer', answerText);
+      notifyCompletion(data, answerText);
+    } else {
+      notifyCompletion(data, '');
+    }
+  });
+}
+
+async function refreshSessions() {
+  try {
+    const res = await fetch(host + '/sessions');
+    if (!res.ok) return;
+    const list = await res.json();
+    const container = document.getElementById('sessions');
+    container.innerHTML = '';
+    sessionNameMap = {};
+    list.forEach(s => {
+      sessionNameMap[s.id] = s.name;
+      const btn = document.createElement('button');
+      btn.textContent = s.name;
+      btn.style.display='block';
+      btn.style.width='100%';
+      btn.style.margin='0 0 4px';
+      btn.style.background = (s.id===currentSession)?'#2b6cb0':'#2d3748';
+      btn.style.fontSize='.8rem';
+      btn.addEventListener('click', () => { currentSession = s.id; document.getElementById('log').innerHTML=''; document.getElementById('activeSessionLabel').textContent = 'Session: '+s.name; connectSessionStream(); });
+      container.appendChild(btn);
+    });
+    // Auto-select first session if none selected
+    if (!currentSession && list.length) {
+      currentSession = list[0].id;
+      document.getElementById('activeSessionLabel').textContent = 'Session: '+list[0].name;
+      connectSessionStream();
+    }
+  } catch {}
+}
+
+// Notification Handling
+function requestNotifyPermission() {
+  if (!('Notification' in window)) { append('info','Notifications not supported'); return; }
+  if (Notification.permission === 'default') {
+    Notification.requestPermission().then(p => {
+      append('info', 'Notification permission: '+p);
+    });
+  } else {
+    append('info', 'Notification permission already: '+Notification.permission);
   }
-});
+}
+
+function notifyCompletion(doneData, answer) {
+  if (!('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return; // silent if not granted
+  try {
+    const sessName = sessionNameMap[doneData.sessionId] || 'session';
+    const snippet = (answer||'').replace(/\s+/g,' ').slice(0,140) + (answer && answer.length>140 ? '…' : '');
+    new Notification(`Response complete (${sessName})`, { body: snippet || `id ${doneData.id} finished`, tag: doneData.id });
+  } catch {}
+}
+
+document.getElementById('enableNotifyBtn').addEventListener('click', requestNotifyPermission);
+
+refreshSessions();
+connectSessionStream();
 </script>
 </body>
 </html>

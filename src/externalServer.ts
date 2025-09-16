@@ -14,10 +14,25 @@ interface ServerOptions {
 export class ExternalServer {
   private server?: http.Server;
   private sseClients = new Set<http.ServerResponse>();
+  private sessions: Map<string, { id: string; name: string; created: number; messages: (InboundMessage & { sessionId?: string })[] }> = new Map();
+  private clientSessionMap: Map<http.ServerResponse, string | undefined> = new Map();
 
   constructor(private options: ServerOptions, private bus: MessageBus, private proxy: any, private output: vscode.OutputChannel, private webRoot?: string, private autoInvoke: boolean = true, private agent?: AgentController, private agentEnabled: boolean = false) {}
 
   async start() {
+    // Auto create sessions based on workspace folders (run once)
+    if (this.sessions.size === 0) {
+      const folders = vscode.workspace.workspaceFolders || [];
+      if (folders.length) {
+        for (const f of folders) {
+          const id = f.uri.fsPath; // stable id
+            this.sessions.set(id, { id, name: path.basename(f.uri.fsPath), created: Date.now(), messages: [] });
+        }
+      } else {
+        this.sessions.set('default-session', { id: 'default-session', name: 'default', created: Date.now(), messages: [] });
+      }
+    }
+
     this.server = http.createServer(async (req, res) => {
       // CORS
       const origin = req.headers.origin || '*';
@@ -28,7 +43,12 @@ export class ExternalServer {
       res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
       if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
-      if (req.url === '/' && req.method === 'GET') {
+      // Basic routing parse (ignore query part for path)
+      const fullUrl = req.url || '/';
+      const [pathPart, queryString] = fullUrl.split('?');
+      const queryParams = new URLSearchParams(queryString || '');
+
+      if (pathPart === '/' && req.method === 'GET') {
         const indexPath = this.webRoot ? path.join(this.webRoot, 'web', 'index.html') : undefined;
         if (indexPath && fs.existsSync(indexPath)) {
           const html = fs.readFileSync(indexPath);
@@ -41,20 +61,43 @@ export class ExternalServer {
         return;
       }
 
-      if (req.url === '/message' && req.method === 'POST') {
+      if (pathPart === '/sessions' && req.method === 'GET') {
+        // List sessions
+        res.writeHead(200, { 'Content-Type': 'application/json'});
+        res.end(JSON.stringify(Array.from(this.sessions.values()).map(s => ({ id: s.id, name: s.name, created: s.created, count: s.messages.length }))));
+        return;
+      }
+
+      if (pathPart === '/sessions' && req.method === 'POST') { res.writeHead(405); res.end('auto-managed'); return; }
+
+      if (pathPart?.startsWith('/sessions/') && req.method === 'GET') {
+        const sid = pathPart.split('/')[2];
+        const sess = this.sessions.get(sid);
+        if (!sess) { res.writeHead(404); res.end('No session'); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ id: sess.id, name: sess.name, messages: sess.messages }));
+        return;
+      }
+
+      if (pathPart === '/message' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
           try {
             const parsed = JSON.parse(body || '{}');
             const text = parsed.text || parsed.message;
+            const sessionId = parsed.sessionId as string | undefined;
             if (!text) {
               res.writeHead(400); res.end(JSON.stringify({ error: 'text required'})); return;
             }
-            const msg: InboundMessage = { id: Date.now().toString(), text, source: 'http' };
+            const msg: InboundMessage & { sessionId?: string } = { id: Date.now().toString(), text, source: 'http', sessionId };
+            if (sessionId) {
+              const sess = this.sessions.get(sessionId);
+              if (sess) sess.messages.push(msg);
+            }
             this.bus.emitInbound(msg);
             res.writeHead(202, { 'Content-Type': 'application/json'});
-            res.end(JSON.stringify({ accepted: true, id: msg.id }));
+            res.end(JSON.stringify({ accepted: true, id: msg.id, sessionId }));
             if (this.agentEnabled && parsed.mode === 'agent' && this.agent) {
               try {
                 this.agent.run({ goal: text, id: msg.id, maxSteps: parsed.maxSteps || 12 });
@@ -75,7 +118,8 @@ export class ExternalServer {
         return;
       }
 
-      if (req.url === '/events' && req.method === 'GET') {
+      if (pathPart === '/events' && req.method === 'GET') {
+        const sessionFilter = queryParams.get('session') || undefined;
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -83,6 +127,7 @@ export class ExternalServer {
         });
         res.write('\n');
         this.sseClients.add(res);
+        this.clientSessionMap.set(res, sessionFilter);
         req.on('close', () => this.sseClients.delete(res));
         return;
       }
@@ -101,8 +146,14 @@ export class ExternalServer {
       this.broadcast({ event: 'inbound', data: msg });
     });
     this.bus.onOutbound(frag => {
-      this.broadcast({ event: 'fragment', data: frag });
-      if (frag.done) this.broadcast({ event: 'done', data: { id: frag.id, model: frag.model } });
+      // Try to match correlation id to a session
+      let sessionId: string | undefined;
+      for (const sess of this.sessions.values()) {
+        if (sess.messages.find(m => m.id === frag.id)) { sessionId = sess.id; break; }
+      }
+      const withSession = { ...frag, sessionId };
+      this.broadcast({ event: 'fragment', data: withSession });
+      if (frag.done) this.broadcast({ event: 'done', data: { id: frag.id, model: frag.model, sessionId } });
     });
   }
 
@@ -114,6 +165,13 @@ export class ExternalServer {
   private broadcast(payload: { event: string; data: any }) {
     const line = `event: ${payload.event}\ndata: ${JSON.stringify(payload.data)}\n\n`;
     for (const client of this.sseClients) {
+      const filterSession = this.clientSessionMap.get(client);
+      if (filterSession) {
+        const sessionId = (payload.data && (payload.data.sessionId || (payload.data.id && payload.data.sessionId))) || undefined;
+        if (sessionId && sessionId !== filterSession) continue;
+        // If payload lacks sessionId we allow only if filterSession not set
+        if (!sessionId && filterSession) continue;
+      }
       client.write(line);
     }
   }
