@@ -1,13 +1,15 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { exec } from 'child_process';
 
 export interface ToolActionBase { tool: string; }
 export interface ReadFilesAction extends ToolActionBase { tool: 'readFiles'; files: string[]; }
 export interface EditFileAction extends ToolActionBase { tool: 'editFile'; path: string; content?: string; diff?: string; }
 export interface CreateFileAction extends ToolActionBase { tool: 'createFile'; path: string; content: string; }
 export interface ListFilesAction extends ToolActionBase { tool: 'listFiles'; glob?: string; max?: number; }
-export type ToolAction = ReadFilesAction | EditFileAction | CreateFileAction | ListFilesAction;
+export interface RunCommandAction extends ToolActionBase { tool: 'runCommand'; command: string; cwd?: string; timeoutMs?: number; }
+export type ToolAction = ReadFilesAction | EditFileAction | CreateFileAction | ListFilesAction | RunCommandAction;
 
 export interface ToolResult { tool: string; success: boolean; detail?: any; error?: string; }
 
@@ -98,6 +100,38 @@ export class AgentTools {
           } else {
             results.push({ tool: 'editFile', success: false, error: 'No content field (diff parsing not implemented yet)' });
           }
+        } else if (a.tool === 'runCommand') {
+          const act = a as RunCommandAction;
+          if (!act.command) throw new Error('Missing command');
+          // Restrict cwd to allowed roots (if provided)
+          let relCwd = act.cwd?.replace(/\\/g,'/');
+          if (relCwd) {
+            if (!this.isAllowed(relCwd)) throw new Error('cwd not allowed');
+          } else {
+            relCwd = '';
+          }
+          const absCwd = path.join(this.opts.workspaceRoot, relCwd);
+          const timeoutMs = act.timeoutMs && act.timeoutMs > 0 ? Math.min(act.timeoutMs, 20000) : 8000;
+          if (this.opts.requireApproval) {
+            const approve = await vscode.window.showQuickPick(['Run command', 'Cancel'], { placeHolder: `Agent run: ${act.command}` });
+            if (approve !== 'Run command') throw new Error('User rejected command');
+          }
+          const detail = await new Promise<any>((resolve) => {
+            const child = exec(act.command, { cwd: absCwd, timeout: timeoutMs, maxBuffer: 1024 * 512 }, (error, stdout, stderr) => {
+              const truncatedStdout = stdout.length > 8000 ? stdout.slice(0,8000) + '...[truncated]' : stdout;
+              const truncatedStderr = stderr.length > 4000 ? stderr.slice(0,4000) + '...[truncated]' : stderr;
+              resolve({
+                command: act.command,
+                cwd: relCwd || '.',
+                code: (error as any)?.code ?? 0,
+                signal: (error as any)?.signal,
+                stdout: truncatedStdout,
+                stderr: truncatedStderr,
+                timedOut: (error as any)?.killed && (error as any)?.signal === 'SIGTERM'
+              });
+            });
+          });
+          results.push({ tool: 'runCommand', success: true, detail });
         } else {
           const anyAction: any = a as any;
           results.push({ tool: anyAction.tool || 'unknown', success: false, error: 'Unknown tool' });

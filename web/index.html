@@ -9,6 +9,7 @@ body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background:
 header { font-size: 1.25rem; margin-bottom: 1rem; }
 #inputRow { display:flex; gap:.5rem; margin-bottom:1rem; }
 #prompt { flex:1; padding:.5rem .75rem; font-size:1rem; border-radius:6px; border:1px solid #2d3748; background:#1a202c; color:#f7fafc; }
+select.modeSel { padding:.5rem .5rem; font-size:.85rem; background:#1a202c; color:#e2e8f0; border:1px solid #2d3748; border-radius:6px; font-weight:600; letter-spacing:.5px; }
 button { padding:.6rem 1rem; background:#3182ce; border:none; color:#fff; border-radius:6px; cursor:pointer; font-weight:600; }
 button:disabled { opacity:.5; cursor: not-allowed; }
 #log { white-space: pre-wrap; background:#1a202c; padding:1rem; border-radius:8px; min-height:260px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow:auto; }
@@ -17,13 +18,61 @@ button:disabled { opacity:.5; cursor: not-allowed; }
 .inbound { color:#cbd5e0; }
 .done { color:#9ae6b4; }
 .model { color:#f6ad55; }
+/* Modal */
+#optionsOverlay { position:fixed; inset:0; background:rgba(15,17,21,.75); display:none; align-items:center; justify-content:center; z-index:1000; }
+#optionsModal { background:#1a202c; padding:1rem 1.25rem 1.25rem; border-radius:10px; width:340px; max-width:90%; box-shadow:0 8px 32px rgba(0,0,0,.45); }
+#optionsModal h2 { margin:0 0 .9rem; font-size:1rem; letter-spacing:.05em; }
+.optionRow { display:flex; align-items:center; justify-content:space-between; margin-bottom:.9rem; gap:.75rem; }
+.optionRow label { flex:1; font-size:.8rem; color:#cbd5e0; line-height:1.2; }
+.optionRow input[type=checkbox] { transform:scale(1.15); cursor:pointer; }
+#closeOptions { background:#4a5568; font-size:.7rem; padding:.45rem .7rem; }
+#optionsBtn { background:#4a5568; font-size:.7rem; padding:.45rem .7rem; }
+.divider { height:1px; background:#2d3748; margin:.75rem -1.25rem; }
+.subtle { font-size:.65rem; color:#718096; margin-top:-.5rem; margin-bottom:.75rem; }
+/* Markdown / code styling */
+.md-answer { line-height:1.45; }
+.md-answer p { margin:.4rem 0; }
+.md-answer h1,.md-answer h2,.md-answer h3 { font-weight:600; line-height:1.2; margin:.9rem 0 .4rem; }
+.md-answer h1 { font-size:1.15rem; }
+.md-answer h2 { font-size:1.05rem; }
+.md-answer h3 { font-size:.95rem; }
+.md-answer code { background:#2d3748; padding:2px 5px; border-radius:4px; font-size:.8rem; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+.md-answer pre { background:#1a2433; padding:.75rem .9rem; border-radius:8px; overflow:auto; font-size:.75rem; line-height:1.35; border:1px solid #2d3b4d; }
+.md-answer pre code { background:transparent; padding:0; }
+.md-answer ul { margin:.4rem 0 .6rem .9rem; padding:0; }
+.md-answer li { margin:.25rem 0; }
+.token-key { color:#63b3ed; }
+.token-string { color:#9ae6b4; }
+.token-number { color:#f6ad55; }
+.token-boolean { color:#ed64a6; }
+.token-null { color:#a0aec0; font-style:italic; }
 </style>
 </head>
 <body>
 <header style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
   <span>Copilot Anywhere Web Client</span>
-  <button id="enableNotifyBtn" style="background:#4a5568; font-size:.7rem; padding:.4rem .6rem;">Enable Notifications</button>
+<div style="display:flex; gap:.5rem;">
+    <button id="optionsBtn">Options</button>
+</div>
 </header>
+<div id="optionsOverlay">
+    <div id="optionsModal" role="dialog" aria-modal="true" aria-labelledby="optsTitle">
+        <h2 id="optsTitle">Options</h2>
+        <div class="optionRow">
+            <label for="debugToggle">Debug view (show fragments, info, inbound, done lines)</label>
+            <input type="checkbox" id="debugToggle" />
+        </div>
+        <div class="optionRow" style="margin-top:-.5rem;">
+            <label for="notifyToggle">Desktop notifications on completion</label>
+            <input type="checkbox" id="notifyToggle" />
+        </div>
+        <p class="subtle" id="notifyStatus"></p>
+        <div class="divider"></div>
+        <div style="display:flex; justify-content:flex-end; gap:.5rem;">
+            <button id="closeOptions">Close</button>
+        </div>
+    </div>
+</div>
 <div style="display:flex; gap:1rem; flex-wrap:wrap; align-items:flex-start;">
   <div style="min-width:220px; flex:0 0 220px;">
     <h3 style="margin:0 0 .5rem; font-size:.9rem; letter-spacing:.05em; color:#a0aec0;">Projects</h3>
@@ -31,6 +80,10 @@ button:disabled { opacity:.5; cursor: not-allowed; }
   </div>
   <div style="flex:1; min-width:320px;">
     <div id="inputRow">
+      <select id="mode" class="modeSel" title="Mode">
+        <option value="ask">Ask</option>
+        <option value="agent">Agent</option>
+      </select>
       <input id="prompt" placeholder="Ask anything (Enter to send)" />
       <button id="sendBtn">Send</button>
     </div>
@@ -45,15 +98,38 @@ let currentSession = null; // session id
 let sessionEventSource = null;
 const logEl = document.getElementById('log');
 const promptEl = document.getElementById('prompt');
+const modeEl = document.getElementById('mode');
 const sendBtn = document.getElementById('sendBtn');
+    // Preferences
+    let debugEnabled = (localStorage.getItem('ca_debug') ?? '1') !== '0';
+    let notifyPref = (localStorage.getItem('ca_notify') === '1');
+
+    const debugTypes = new Set(['info', 'fragment', 'done', 'inbound']); // lines considered debug (plus any other non primary types)
+
+    function applyDebugVisibility() {
+        const hidden = !debugEnabled;
+        document.querySelectorAll('.debug-line').forEach(el => {
+            el.style.display = hidden ? 'none' : '';
+        });
+    }
 
 function append(type, text, extra={}) {
   const line = document.createElement('div');
   line.className = type;
+    const isDebug = debugTypes.has(type) || (!['outgoing', 'answer', 'error'].includes(type));
+    if (isDebug) line.classList.add('debug-line');
   const badge = document.createElement('span');
   badge.className = 'tag';
   badge.textContent = type.toUpperCase();
   line.appendChild(badge);
+  if (extra.agentTag) {
+    const ag = document.createElement('span');
+    ag.className = 'tag';
+    ag.style.background = '#553c9a';
+    ag.style.color = '#d6bcfa';
+    ag.textContent = 'AGENT';
+    line.appendChild(ag);
+  }
   if (extra.model) {
     const m = document.createElement('span');
     m.className='tag model';
@@ -61,19 +137,82 @@ function append(type, text, extra={}) {
     line.appendChild(m);
   }
   const span = document.createElement('span');
-  span.textContent = text;
+  if (type === 'answer') {
+    span.className = 'md-answer';
+    span.innerHTML = renderMarkdown(safeTruncate(text, 20000));
+  } else {
+    span.textContent = text;
+  }
   line.appendChild(span);
+    if (!debugEnabled && isDebug) {
+        line.style.display = 'none';
+    }
   logEl.appendChild(line);
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+// --- Markdown Rendering (minimal) ---
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
+function safeTruncate(s, max){ return s.length>max ? s.slice(0,max)+"\n...truncated..." : s; }
+function highlightJson(code){
+  try { const obj = JSON.parse(code); return syntaxColorJson(obj); } catch { /* fallback */ }
+  return escapeHtml(code);
+}
+function syntaxColorJson(obj){
+  const json = JSON.stringify(obj, null, 2);
+  return json.replace(/(&|<|>|"|')/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))
+            .replace(/("(\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"\s*:)/g,'<span class="token-key">$1</span>')
+            .replace(/"(\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"/g,'<span class="token-string">$&</span>')
+            .replace(/\b(true|false)\b/g,'<span class="token-boolean">$1</span>')
+            .replace(/\b(null)\b/g,'<span class="token-null">$1</span>')
+            .replace(/(-?\b\d+(?:\.\d+)?(?:e[+\-]?\d+)?\b)/gi,'<span class="token-number">$1</span>');
+}
+function renderMarkdown(src){
+  // Extract fenced code blocks first
+  const fences = [];
+  let i=0; let text = src.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g,(m,lang,code)=>{const token='__CODE_FENCE_'+(i++)+'__'; fences.push({token, lang: (lang||'').toLowerCase(), code}); return token;});
+  // Basic escapes
+  text = escapeHtml(text);
+  // Headings
+  text = text.replace(/^###### (.*)$/gm,'<h6>$1</h6>')
+             .replace(/^##### (.*)$/gm,'<h5>$1</h5>')
+             .replace(/^#### (.*)$/gm,'<h4>$1</h4>')
+             .replace(/^### (.*)$/gm,'<h3>$1</h3>')
+             .replace(/^## (.*)$/gm,'<h2>$1</h2>')
+             .replace(/^# (.*)$/gm,'<h1>$1</h1>');
+  // Bold / italic
+  text = text.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+             .replace(/\*([^*]+)\*/g,'<em>$1</em>');
+  // Inline code
+  text = text.replace(/`([^`]+)`/g,(m,code)=>'<code>'+escapeHtml(code)+'</code>');
+  // Lists
+  text = text.replace(/^(?:- |\* )(.*)$/gm,'<li>$1</li>');
+  text = text.replace(/(<li>[^<]+<\/li>\n?)+/g,m=>'<ul>'+m.replace(/\n/g,'')+'</ul>');
+  // Paragraphs (split by blank lines)
+  text = text.replace(/(?:^|\n)([^<\n][^\n]*)(?=\n|$)/g,(m,line)=>{ if(/^<h\d|<ul>|<li>|<pre>|<blockquote>|<p>|<\/ul>|<\/li>/.test(line.trim())) return m; return '\n<p>'+line.trim()+'</p>'; });
+  // Restore fences
+  for(const f of fences){
+    let rendered;
+    if(['json','application/json'].includes(f.lang)) {
+      rendered = '<pre><code>'+highlightJson(f.code)+'</code></pre>';
+    } else {
+      const escaped = escapeHtml(f.code);
+      rendered = '<pre><code>'+escaped+'</code></pre>';
+    }
+    text = text.replace(f.token, rendered);
+  }
+  return text;
 }
 
 async function sendPrompt() {
   const value = promptEl.value.trim();
   if (!value) return;
+  const mode = modeEl.value;
+  const outgoingText = mode === 'agent' && !value.toLowerCase().startsWith('agent:') ? 'agent: '+value : value;
   sendBtn.disabled = true;
-  append('outgoing', value);
+  append('outgoing', outgoingText, { agentTag: mode === 'agent' });
   try {
-    const payload = { text: value };
+    const payload = { text: outgoingText, mode: mode === 'agent' ? 'agent' : undefined };
     if (currentSession) payload.sessionId = currentSession;
     const res = await fetch(host + '/message', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     if (!res.ok) {
@@ -81,7 +220,7 @@ async function sendPrompt() {
       append('error', 'HTTP error: '+t);
     } else {
       const data = await res.json();
-      append('info', 'Sent id='+data.id);
+      append('info', 'Sent id='+data.id, { agentTag: mode === 'agent' });
     }
   } catch (e) {
     append('error', 'Network error '+e);
@@ -108,14 +247,17 @@ function connectSessionStream() {
     const data = JSON.parse(ev.data);
     if (!buffer[data.id]) buffer[data.id] = '';
     buffer[data.id] += data.fragment;
-    append('fragment', data.fragment, { id: data.id, model: data.model });
+  const isAgent = data.model === 'agent' || /\(agent step/.test(data.fragment);
+  append('fragment', data.fragment, { id: data.id, model: data.model, agentTag: isAgent });
   });
   sessionEventSource.addEventListener('done', ev => {
     const data = JSON.parse(ev.data);
-    append('done', 'Complete for id='+data.id+' (model '+data.model+')');
+  const isAgent = data.model === 'agent';
+  append('done', 'Complete for id='+data.id+' (model '+data.model+')', { agentTag: isAgent });
     if (buffer[data.id]) {
       const answerText = buffer[data.id];
-      append('answer', answerText);
+  const isAgent = /\[actions\]/.test(answerText) || /Agent finished|Agent reached max steps/i.test(answerText);
+  append('answer', answerText, { agentTag: isAgent });
       notifyCompletion(data, answerText);
     } else {
       notifyCompletion(data, '');
@@ -174,7 +316,35 @@ function notifyCompletion(doneData, answer) {
   } catch {}
 }
 
-document.getElementById('enableNotifyBtn').addEventListener('click', requestNotifyPermission);
+    // Options modal wiring
+    const optionsOverlay = document.getElementById('optionsOverlay');
+    const optionsBtn = document.getElementById('optionsBtn');
+    const closeOptions = document.getElementById('closeOptions');
+    const debugToggle = document.getElementById('debugToggle');
+    const notifyToggle = document.getElementById('notifyToggle');
+    const notifyStatus = document.getElementById('notifyStatus');
+
+    function openOptions() { optionsOverlay.style.display = 'flex'; debugToggle.focus(); updateNotifyStatus(); }
+    function closeOptionsModal() { optionsOverlay.style.display = 'none'; }
+
+    optionsBtn.addEventListener('click', openOptions);
+    closeOptions.addEventListener('click', closeOptionsModal);
+    optionsOverlay.addEventListener('click', e => { if (e.target === optionsOverlay) closeOptionsModal(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && optionsOverlay.style.display === 'flex') closeOptionsModal(); });
+
+    debugToggle.checked = debugEnabled;
+    debugToggle.addEventListener('change', () => { debugEnabled = debugToggle.checked; localStorage.setItem('ca_debug', debugEnabled ? '1' : '0'); applyDebugVisibility(); });
+
+    notifyToggle.checked = notifyPref;
+    notifyToggle.addEventListener('change', () => { notifyPref = notifyToggle.checked; localStorage.setItem('ca_notify', notifyPref ? '1' : '0'); if (notifyPref) requestNotifyPermission(); updateNotifyStatus(); });
+
+    function updateNotifyStatus() {
+        if (!('Notification' in window)) { notifyStatus.textContent = 'Notifications not supported in this browser.'; return; }
+        notifyStatus.textContent = 'Permission: ' + Notification.permission + (notifyPref ? ' (enabled)' : ' (disabled)');
+    }
+
+    applyDebugVisibility();
+    updateNotifyStatus();
 
 refreshSessions();
 connectSessionStream();

@@ -1,31 +1,37 @@
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Run Extension",
-      "type": "extensionHost",
-      "request": "launch",
-      "runtimeExecutable": "${execPath}",
-      "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
-      ],
-      "outFiles": [
-        "${workspaceFolder}/dist/**/*.js"
-      ],
-      "preLaunchTask": "npm: compile"
-    },
-    {
-      "name": "Run Extension2",
-      "type": "extensionHost",
-      "request": "launch",
-      "runtimeExecutable": "${execPath}",
-      "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
-      ],
-      "outFiles": [
-        "${workspaceFolder}/dist/**/*.js"
-      ],
-      "preLaunchTask": "npm: compile"
-    },
-  ]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Extension3",
+            "type": "extensionHost",
+            "request": "launch",
+            "runtimeExecutable": "${execPath}",
+            "args": [
+                "--new-window",
+                "--user-data-dir=/tmp/vscode-exthost2",
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "/Users/sozercan/Downloads/test2"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/dist/**/*.js"
+            ],
+            "preLaunchTask": "npm: compile"
+        },
+        {
+            "name": "Run Extension4",
+            "type": "extensionHost",
+            "request": "launch",
+            "runtimeExecutable": "${execPath}",
+            "args": [
+                "--new-window",
+                "--user-data-dir=/tmp/vscode-exthost2",
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "/Users/sozercan/Downloads/test2"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/dist/**/*.js"
+            ],
+            "preLaunchTask": "npm: compile"
+        }
+    ]
 }

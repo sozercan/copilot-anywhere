@@ -18,6 +18,7 @@ IMPORTANT OUTPUT RULES:
   - readFiles { "tool": "readFiles", "files": ["relative/path.ts", ...] }
   - createFile { "tool": "createFile", "path": "path/newFile.txt", "content": "full file text" }
   - editFile { "tool": "editFile", "path": "path/existingFile.ts", "content": "entire new file content" }
+    - runCommand { "tool": "runCommand", "command": "npm test", "cwd": "optional/relative/dir", "timeoutMs": 8000 }
 4. For edits you MUST readFiles first in a prior step (unless creating a brand new file with createFile).
 5. Provide concise commentary (<= 160 chars) explaining WHY you chose the actions.
 6. FINAL step: { "finalSummary": "...", "done": true }
@@ -114,10 +115,31 @@ export class AgentController {
       } else {
         emptyActionRetries = 0;
       }
-  const actionSummary = `[actions]\n${actions.map(a => a.tool + (a as any).path ? ':' + (a as any).path : '').join(', ')}`;
+  const actionSummary = `[actions]\n${actions.map(a => a.tool + ((a as any).path ? ':' + (a as any).path : '')).join(', ')}`;
   this.bus.emitOutbound({ id: correlationId, fragment: actionSummary, model: model.name });
   onStream?.(actionSummary, false);
   const results = await this.tools.execute(actions as any);
+
+      // Provide friendlier summaries for runCommand results before raw JSON
+      for (const r of results) {
+        if (r.tool === 'runCommand' && r.success && r.detail) {
+          const d = r.detail;
+          const line = `[run] ${d.command} (code ${d.code}${d.timedOut ? ', timed out' : ''})`;
+          this.bus.emitOutbound({ id: correlationId, fragment: line, model: model.name });
+          onStream?.(line, false);
+          if (d.stdout) {
+            const first = d.stdout.split(/\r?\n/).slice(0,6).join('\n');
+            const outLine = first.trim().length ? `[stdout]\n${first}` : '';
+            if (outLine) { this.bus.emitOutbound({ id: correlationId, fragment: outLine, model: model.name }); onStream?.(outLine, false); }
+          }
+          if (d.stderr) {
+            const firstErr = d.stderr.split(/\r?\n/).slice(0,4).join('\n');
+            const errLine = firstErr.trim().length ? `[stderr]\n${firstErr}` : '';
+            if (errLine) { this.bus.emitOutbound({ id: correlationId, fragment: errLine, model: model.name }); onStream?.(errLine, false); }
+          }
+        }
+      }
+
       const resultsFrag = `\n[action results]\n${JSON.stringify(results).slice(0,2000)}`;
       this.bus.emitOutbound({ id: correlationId, fragment: resultsFrag, model: model.name });
       onStream?.(resultsFrag, false);
