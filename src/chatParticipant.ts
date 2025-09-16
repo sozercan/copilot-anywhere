@@ -5,13 +5,23 @@ import { AgentController } from './agentController';
 
 export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, extensionUri: vscode.Uri, agent?: AgentController, agentPrefix: string = 'agent:') {
   const handler: vscode.ChatRequestHandler = async (request, context, stream, token) => {
+    // Determine sessionId: active editor's workspace folder path, else first workspace folder, else undefined
+    let sessionId: string | undefined;
+    const activeDoc = vscode.window.activeTextEditor?.document;
+    const folders = vscode.workspace.workspaceFolders || [];
+    if (activeDoc) {
+      const folder = vscode.workspace.getWorkspaceFolder(activeDoc.uri);
+      if (folder) sessionId = folder.uri.fsPath;
+    }
+    if (!sessionId && folders.length) sessionId = folders[0].uri.fsPath;
     const inbound: InboundMessage = {
       id: Date.now().toString(),
       text: request.prompt,
-      source: 'chat'
+      source: 'chat',
+      sessionId
     };
     // Forward to bus so external clients also see it
-    bus.emitInbound(inbound);
+  bus.emitInbound(inbound);
     const trimmed = request.prompt.trim();
     if (agent && trimmed.toLowerCase().startsWith(agentPrefix.toLowerCase())) {
       let goal = trimmed.slice(agentPrefix.length).trim();

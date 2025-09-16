@@ -141,8 +141,16 @@ export class ExternalServer {
 
     // bus listeners
     this.bus.onInbound(msg => {
-      // Could optionally trigger auto-response by invoking chat participant programmatically
-      // For MVP we just broadcast inbound messages to SSE
+      // If message has a sessionId, append to that session's history (covers chat-originated messages)
+      if (msg.sessionId) {
+        let target = this.sessions.get(msg.sessionId);
+        if (!target) {
+          // Create a session placeholder if new folder opened after activation
+            this.sessions.set(msg.sessionId, { id: msg.sessionId, name: path.basename(msg.sessionId) || 'session', created: Date.now(), messages: [] });
+            target = this.sessions.get(msg.sessionId);
+        }
+        target?.messages.push(msg as any);
+      }
       this.broadcast({ event: 'inbound', data: msg });
     });
     this.bus.onOutbound(frag => {

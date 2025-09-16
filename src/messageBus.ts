@@ -2,6 +2,7 @@ export interface InboundMessage {
   id: string;
   text: string;
   source: 'chat' | 'http' | 'sse' | 'command';
+  sessionId?: string; // optional project/session correlation
 }
 
 export interface OutboundFragment {
