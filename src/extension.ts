@@ -23,6 +23,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const agentRoots = config.get<string[]>('agent.allowedRoots', ['src','web','README.md']);
   const agentRequireApproval = config.get<boolean>('agent.requireApproval', false);
   const agentPrefix = config.get<string>('agent.prefix', 'agent:');
+    const persistenceEnabled = config.get<boolean>('persistence.enabled', true);
+    const persistenceDirSetting = config.get<string>('persistence.directory', '');
+    const persistenceMax = config.get<number>('persistence.maxMessagesPerSession', 500);
 
   bus = new MessageBus();
   proxy = new CopilotProxy(bus);
@@ -43,7 +46,14 @@ export async function activate(context: vscode.ExtensionContext) {
     const withAgent = registerChatParticipant(bus, proxy, context.extensionUri, agentController, agentPrefix);
     context.subscriptions.push(withAgent);
   }
-  externalServer = new ExternalServer({ port, host, allowOrigins }, bus, proxy, vscode.window.createOutputChannel('Copilot Anywhere'), context.extensionPath, effectiveAutoInvoke, agentController, agentEnabled);
+    // Determine persistence directory (config override else global storage)
+    let persistenceDir = persistenceDirSetting;
+    if (!persistenceDir) {
+        persistenceDir = context.globalStorageUri.fsPath;
+    }
+    try { await vscode.workspace.fs.createDirectory(vscode.Uri.file(persistenceDir)); } catch { }
+
+    externalServer = new ExternalServer({ port, host, allowOrigins, persistence: { enabled: persistenceEnabled, dir: persistenceDir, maxMessages: persistenceMax } }, bus, proxy, vscode.window.createOutputChannel('Copilot Anywhere'), context.extensionPath, effectiveAutoInvoke, agentController, agentEnabled);
   await externalServer.start();
 
   context.subscriptions.push({ dispose: () => externalServer?.dispose() });
@@ -56,11 +66,23 @@ export async function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(testCmd);
 
+    const openWeb = vscode.commands.registerCommand('copilotAnywhere.openWeb', async () => {
+      try {
+        // Use localhost instead of 0.0.0.0 or :: for a clickable browser-friendly URL
+        const displayHost = (host === '0.0.0.0' || host === '::' || host === '::1') ? 'localhost' : host;
+        const url = `http://${displayHost}:${port}`;
+        await vscode.env.openExternal(vscode.Uri.parse(url));
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`Failed to open web UI: ${e.message || e}`);
+      }
+    });
+    context.subscriptions.push(openWeb);
+
   // Listen for HTTP inbound messages and optionally inject into chat UI
   if (injectIntoChat) {
     bus?.onInbound(async (msg) => {
       if (msg.source !== 'http') return;
-      const prompt = `@CopilotAnywhere ${msg.text}`;
+        const prompt = `@copilot-anywhere ${msg.text}`;
       try {
         // Open the chat UI with prefilled prompt (command arg usage is unofficial and may change)
         await vscode.commands.executeCommand('workbench.action.chat.open', prompt);

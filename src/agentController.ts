@@ -53,9 +53,12 @@ export class AgentController {
 
   let emptyActionRetries = 0;
     for (let step = 0; step < opts.maxSteps; step++) {
-      const stepHeader = `(agent step ${step + 1}/${opts.maxSteps})`;
-      this.bus.emitOutbound({ id: correlationId, fragment: stepHeader, model: 'agent' });
-      onStream?.(stepHeader, false);
+        // (Removed explicit step header output as per formatting preference)
+        if (step > 0) {
+            const spacer = '\n';
+            this.bus.emitOutbound({ id: correlationId, fragment: spacer, model: 'agent' });
+            onStream?.(spacer, false);
+        }
       const model = (await vscode.lm.selectChatModels({}))[0];
       if (!model) {
         const msg = 'No chat model available for agent.';
@@ -95,6 +98,7 @@ export class AgentController {
 
       const commentary: string = parsed.commentary || '';
       if (commentary) {
+          // Output commentary plain (no label)
         this.bus.emitOutbound({ id: correlationId, fragment: commentary, model: model.name });
         onStream?.(commentary, false);
       }
@@ -115,7 +119,8 @@ export class AgentController {
       } else {
         emptyActionRetries = 0;
       }
-  const actionSummary = `[actions]\n${actions.map(a => a.tool + ((a as any).path ? ':' + (a as any).path : '')).join(', ')}`;
+        const actionLines = actions.map(a => `- ${a.tool}${(a as any).path ? ': ' + (a as any).path : ''}`);
+        const actionSummary = `Actions:\n${actionLines.join('\n')}`;
   this.bus.emitOutbound({ id: correlationId, fragment: actionSummary, model: model.name });
   onStream?.(actionSummary, false);
   const results = await this.tools.execute(actions as any);
@@ -140,12 +145,32 @@ export class AgentController {
         }
       }
 
-      const resultsFrag = `\n[action results]\n${JSON.stringify(results).slice(0,2000)}`;
+        // Human-readable summaries instead of raw JSON
+        const summaries = results.map(r => {
+            const base = r.tool;
+            if (!r.success) return `${base} failed${r.error ? ': ' + r.error : ''}`;
+            if (r.tool === 'readFiles' && r.detail?.files) {
+                const files = r.detail.files.map((f: any) => f.path).join(', ');
+                return `read ${r.detail.files.length} file(s): ${files}`;
+            }
+            if (r.tool === 'createFile') {
+                return `created file ${(r as any).path || (r.detail?.path) || ''}`.trim();
+            }
+            if (r.tool === 'editFile') {
+                return `edited file ${(r as any).path || (r.detail?.path) || ''}`.trim();
+            }
+            if (r.tool === 'runCommand') {
+                const d: any = r.detail || {}; return `ran '${d.command}' exit=${d.code}${d.timedOut ? ' (timed out)' : ''}`;
+            }
+            return `${base} ok`;
+        });
+        const resultsFrag = `Results:\n${summaries.map(s => `- ${s}`).join('\n')}`;
       this.bus.emitOutbound({ id: correlationId, fragment: resultsFrag, model: model.name });
       onStream?.(resultsFrag, false);
 
-      history.push(vscode.LanguageModelChatMessage.Assistant(rawJson!));
-      history.push(vscode.LanguageModelChatMessage.User(`TOOL_RESULTS:\n${JSON.stringify(results)}`));
+        // Keep feeding structured JSON to the model for context (even though user sees summaries)
+        history.push(vscode.LanguageModelChatMessage.Assistant(rawJson!));
+        history.push(vscode.LanguageModelChatMessage.User(`TOOL_RESULTS:\n${JSON.stringify(results)}`));
     }
     const msg = 'Agent reached max steps';
     this.bus.emitOutbound({ id: opts.id, fragment: msg, done: true });

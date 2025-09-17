@@ -1,7 +1,7 @@
 {
     "name": "copilot-anywhere",
     "displayName": "Copilot Anywhere",
-    "description": "Bridge GitHub Copilot Chat with external clients via HTTP & SSE (real-time proxy).",
+    "description": "Bridge Copilot Chat with external HTTP/SSE clients and an autonomous agent.",
     "version": "0.0.1",
     "publisher": "your-publisher-id",
     "engines": {
@@ -20,6 +20,10 @@
             {
                 "command": "copilotAnywhere.sendTest",
                 "title": "Copilot Anywhere: Send Test Message"
+            },
+            {
+                "command": "copilotAnywhere.openWeb",
+                "title": "Copilot Anywhere: Open Web Sessions UI"
             }
         ],
         "configuration": {
@@ -87,17 +91,58 @@
                 },
                 "copilotAnywhere.agent.prefix": {
                     "type": "string",
-                    "default": "agent:",
+                    "default": "",
                     "description": "If a chat prompt to @CopilotAnywhere starts with this prefix, it will invoke the autonomous agent loop instead of a single model response."
+                },
+                "copilotAnywhere.persistence.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Persist session messages to disk so history survives reloads."
+                },
+                "copilotAnywhere.persistence.directory": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Directory to store persistence files. Empty = extension global storage path."
+                },
+                "copilotAnywhere.persistence.maxMessagesPerSession": {
+                    "type": "number",
+                    "default": 500,
+                    "description": "Maximum messages to load back into memory per session at startup (recent tail)."
                 }
             }
         },
         "chatParticipants": [
             {
                 "id": "copilot-anywhere.proxy",
-                "name": "CopilotAnywhere",
+                "name": "copilot-anywhere",
+                "fullName": "Copilot Anywhere",
+                "description": "Bridge chat to HTTP & run autonomous workspace agent",
                 "isSticky": true,
-                "fullName": "Copilot Anywhere Agent Proxy"
+                "commands": [
+                    {
+                        "name": "agent",
+                        "description": "Run the autonomous workspace agent"
+                    },
+                    {
+                        "name": "files",
+                        "description": "List recent created or edited files in this session"
+                    },
+                    {
+                        "name": "run",
+                        "description": "Run a workspace shell command (agent shortcut)"
+                    }
+                ],
+                "disambiguation": [
+                    {
+                        "category": "agent",
+                        "description": "The user wants to perform multi-step workspace modifications, read or edit project files, or automate refactors.",
+                        "examples": [
+                            "Refactor the logging utilities to use a singleton logger",
+                            "Add a README section about deployment",
+                            "Create a new config file and update imports"
+                        ]
+                    }
+                ]
             }
         ]
     },

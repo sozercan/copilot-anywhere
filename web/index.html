@@ -319,19 +319,29 @@ async function refreshSessions() {
             if (!msgs.length) {
                 append('info', 'No prior history for this session yet.');
             }
+            const seenFinal = new Set();
             msgs.forEach(m => {
                 if (m.direction === 'inbound') {
                     append('inbound', m.text || '', { id: m.id });
-                } else if (m.direction === 'outbound') {
-                    if (m.fragment) {
-                        const isAgent = m.model === 'agent' || /(agent step)/.test(m.fragment);
-                        append('fragment', m.fragment, { id: m.id, model: m.model, agentTag: isAgent });
-                        if (m.done) {
-                            append('done', 'Complete for id=' + m.id + ' (model ' + m.model + ')', { agentTag: isAgent });
-                        }
-                    }
-                }
-            });
+              return;
+          }
+          if (m.direction === 'outbound' && m.fragment) {
+              const isAgent = m.model === 'agent' || /(agent step)/.test(m.fragment);
+            if (m.aggregated) {
+                // Render as final answer
+                const clean = isAgent ? sanitizeAgentAnswer(m.fragment) : m.fragment;
+                append('answer', clean, { id: m.id, model: m.model, agentTag: isAgent });
+                seenFinal.add(m.id);
+                return;
+            }
+            // Skip showing fragment stream if final already displayed (avoid duplication on replay)
+            if (seenFinal.has(m.id)) return;
+            append('fragment', m.fragment, { id: m.id, model: m.model, agentTag: isAgent });
+            if (m.done) {
+                append('done', 'Complete for id=' + m.id + ' (model ' + m.model + ')', { agentTag: isAgent });
+            }
+        }
+      });
   } catch {}
 }
 
