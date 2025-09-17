@@ -7,6 +7,8 @@ import * as path from 'path';
 
 // Track last agent modified / created files for /files slash command
 let lastAgentChangedFiles: string[] = [];
+// Track active agent run correlation ids so we can inline approvals and suppress duplicate global notifications
+const activeAgentRuns = new Set<string>();
 
 export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, extensionUri: vscode.Uri, agent?: AgentController, agentPrefix: string = 'agent:') {
   const handler: vscode.ChatRequestHandler = async (request, context, stream, token) => {
@@ -92,6 +94,18 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
           const actionsCollected: string[] = [];
           const resultsCollected: string[] = [];
           const commentaryCollected: string[] = [];
+          activeAgentRuns.add(inbound.id);
+          // Inline approval listener for this specific run
+          const disposeInlineApproval = bus.onApprovalRequest(req => {
+              if (req.correlationId !== inbound.id) return; // not for this run
+              const snippetSrc = req.diff || req.contentPreview || '';
+              const snippet = snippetSrc.slice(0, 2000); // safety truncate
+              const fenced = snippet ? ['```diff', snippet, '```'].join('\n') : '';
+              stream.markdown(`**Approval Required:** ${req.action} \`${req.path}\`\n\n${fenced}`);
+              // Provide buttons directly in chat
+              stream.button({ command: 'copilotAnywhere.approval.decide', title: 'Approve', arguments: [req.approvalId, true] });
+              stream.button({ command: 'copilotAnywhere.approval.decide', title: 'Reject', arguments: [req.approvalId, false] });
+          });
       try {
           await agent!.run({ goal: goalFromPrefix, id: inbound.id, maxSteps: 12 }, (frag, done) => {
               if (done) {
@@ -146,9 +160,13 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
                   ...(lastAgentChangedFiles.length ? [{ prompt: '/files', title: 'Show changed files' } as any] : [])
               ]
           } as any;
-      } catch (e: any) {
-        stream.markdown(`Agent error: ${e.message || e}`);
-      }
+            } catch (e: any) {
+                stream.markdown(`Agent error: ${e.message || e}`);
+            } finally {
+                    // Clean up inline approval listener & active run tracking
+                    activeAgentRuns.delete(inbound.id);
+                    try { disposeInlineApproval(); } catch {}
+            }
       }
 
       if (agent && trimmed.toLowerCase().startsWith(agentPrefix.toLowerCase())) {
@@ -174,20 +192,19 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
     const participant = vscode.chat.createChatParticipant('copilot-anywhere.proxy', handler);
     participant.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icon.png');
 
-            // Approval request handling: show a VS Code notification with approve/reject buttons.
+            // Global approval request handling (fallback for runs not initiated from current chat): show notification only.
             bus.onApprovalRequest(req => {
-                    const approveCmd: vscode.Command = { command: 'copilotAnywhere.approval.decide', title: 'Approve', arguments: [req.approvalId, true] };
-                    const rejectCmd: vscode.Command = { command: 'copilotAnywhere.approval.decide', title: 'Reject', arguments: [req.approvalId, false] };
-                    const max = 800;
-                    const snippet = req.diff ? req.diff.slice(0,max) : (req.contentPreview || '').slice(0,max);
-                    const detail = `${req.action} ${req.path}`;
-                    // Notification (non-blocking). Buttons executed via commands palette
-                    vscode.window.showInformationMessage(`Approval required: ${detail}`, 'Approve', 'Reject').then(choice => {
-                            if (choice === 'Approve') vscode.commands.executeCommand(approveCmd.command, ...(approveCmd.arguments||[]));
-                            else if (choice === 'Reject') vscode.commands.executeCommand(rejectCmd.command, ...(rejectCmd.arguments||[]));
-                    });
-                    // Emit a synthetic outbound fragment so web + chat history show the pending approval context
-                    bus.emitOutbound({ id: req.approvalId, fragment: `Pending approval: ${detail}\n${snippet ? '---\n'+snippet : ''}`, model: 'agent' });
+                if (activeAgentRuns.has(req.correlationId)) return; // inline handler already rendered buttons
+                const approveCmd: vscode.Command = { command: 'copilotAnywhere.approval.decide', title: 'Approve', arguments: [req.approvalId, true] };
+                const rejectCmd: vscode.Command = { command: 'copilotAnywhere.approval.decide', title: 'Reject', arguments: [req.approvalId, false] };
+                const max = 800;
+                const snippet = req.diff ? req.diff.slice(0,max) : (req.contentPreview || '').slice(0,max);
+                const detail = `${req.action} ${req.path}`;
+                vscode.window.showInformationMessage(`Approval required: ${detail}`, 'Approve', 'Reject').then(choice => {
+                    if (choice === 'Approve') vscode.commands.executeCommand(approveCmd.command, ...(approveCmd.arguments||[]));
+                    else if (choice === 'Reject') vscode.commands.executeCommand(rejectCmd.command, ...(rejectCmd.arguments||[]));
+                });
+                bus.emitOutbound({ id: req.approvalId, fragment: `Pending approval: ${detail}\n${snippet ? '---\n'+snippet : ''}`, model: 'agent' });
             });
     return participant;
 }

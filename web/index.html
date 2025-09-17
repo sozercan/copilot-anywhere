@@ -286,20 +286,22 @@ function connectSessionStream() {
       notifyCompletion(data, '');
     }
   });
-    sessionEventSource.addEventListener('approvalRequest', ev => {
-        const data = JSON.parse(ev.data);
-        queueApproval(data);
-    });
-    sessionEventSource.addEventListener('approvalDecision', ev => {
-        const data = JSON.parse(ev.data);
-        // If current displayed matches, close it
-        if (currentApproval && currentApproval.approvalId === data.approvalId) {
-            append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'} (external)`);
-            closeApprovalModal();
-        } else {
-            append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'}`);
-        }
-    });
+  sessionEventSource.addEventListener('approvalRequest', ev => {
+    const data = JSON.parse(ev.data);
+    // Only enqueue if not already queued (simple dedupe by id) and matches current session (server already filters when ?session specified)
+    queueApproval(data);
+  });
+  sessionEventSource.addEventListener('approvalDecision', ev => {
+    const data = JSON.parse(ev.data);
+    if (currentApproval && currentApproval.approvalId === data.approvalId) {
+      append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'}`);
+      closeApprovalModal();
+    } else {
+      append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'}`);
+      // Remove from queue if still pending
+      approvalQueue = approvalQueue.filter(a => a.approvalId !== data.approvalId);
+    }
+  });
 }
 
         // Remove noisy agent trace decorations for cleaner final display
@@ -455,7 +457,7 @@ function notifyCompletion(doneData, answer) {
         }
         function closeApprovalModal() { approvalOverlay.style.display = 'none'; currentApproval = null; approvalDiff.querySelector('code').textContent = ''; processNextApproval(); }
         function processNextApproval() { if (!currentApproval && approvalQueue.length) { showApproval(approvalQueue.shift()); } }
-        function queueApproval(a) { approvalQueue.push(a); processNextApproval(); append('info', `Approval requested for ${a.action} ${a.path}`); }
+  function queueApproval(a) { approvalQueue.push(a); processNextApproval(); append('info', `Approval requested for ${a.action} ${a.path}`); }
         approveBtn.addEventListener('click', () => decideApproval(true));
         rejectBtn.addEventListener('click', () => decideApproval(false));
         closeApproval.addEventListener('click', closeApprovalModal);

@@ -24,6 +24,7 @@ export class ExternalServer {
     private messageSessionIndex: Map<string, string> = new Map();
     private persistedInboundIds: Set<string> = new Set();
     private pendingOutboundBuffers: Map<string, { fragments: string[]; model?: string; done?: boolean }> = new Map();
+    private approvalSessionIndex: Map<string, string | undefined> = new Map();
 
   constructor(private options: ServerOptions, private bus: MessageBus, private proxy: any, private output: vscode.OutputChannel, private webRoot?: string, private autoInvoke: boolean = true, private agent?: AgentController, private agentEnabled: boolean = false) {}
 
@@ -304,12 +305,16 @@ export class ExternalServer {
     });
 
       // Approval request forwarding
-      this.bus.onApprovalRequest(req => {
-          this.broadcast({ event: 'approvalRequest', data: req });
-      });
-      this.bus.onApprovalDecision(dec => {
-          this.broadcast({ event: 'approvalDecision', data: dec });
-      });
+    this.bus.onApprovalRequest(req => {
+      // Try to attach sessionId from correlation id mapping (agent run id == inbound id)
+      const sessionId = this.messageSessionIndex.get(req.correlationId);
+      this.approvalSessionIndex.set(req.approvalId, sessionId); // record for later decision broadcast
+      this.broadcast({ event: 'approvalRequest', data: { ...req, sessionId } });
+    });
+    this.bus.onApprovalDecision(dec => {
+      const sessionId = this.approvalSessionIndex.get(dec.approvalId);
+      this.broadcast({ event: 'approvalDecision', data: { ...dec, sessionId } });
+    });
   }
 
   private isOriginAllowed(origin: string): boolean {

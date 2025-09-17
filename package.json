@@ -24,6 +24,10 @@
             {
                 "command": "copilotAnywhere.openWeb",
                 "title": "Copilot Anywhere: Open Web Sessions UI"
+            },
+            {
+                "command": "copilotAnywhere.approval.decide",
+                "title": "Copilot Anywhere: Approve or Reject Pending Agent Action"
             }
         ],
         "configuration": {
