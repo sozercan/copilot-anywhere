@@ -171,7 +171,23 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
     }
   };
 
-  const participant = vscode.chat.createChatParticipant('copilot-anywhere.proxy', handler);
-  participant.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icon.png');
-  return participant;
+    const participant = vscode.chat.createChatParticipant('copilot-anywhere.proxy', handler);
+    participant.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icon.png');
+
+            // Approval request handling: show a VS Code notification with approve/reject buttons.
+            bus.onApprovalRequest(req => {
+                    const approveCmd: vscode.Command = { command: 'copilotAnywhere.approval.decide', title: 'Approve', arguments: [req.approvalId, true] };
+                    const rejectCmd: vscode.Command = { command: 'copilotAnywhere.approval.decide', title: 'Reject', arguments: [req.approvalId, false] };
+                    const max = 800;
+                    const snippet = req.diff ? req.diff.slice(0,max) : (req.contentPreview || '').slice(0,max);
+                    const detail = `${req.action} ${req.path}`;
+                    // Notification (non-blocking). Buttons executed via commands palette
+                    vscode.window.showInformationMessage(`Approval required: ${detail}`, 'Approve', 'Reject').then(choice => {
+                            if (choice === 'Approve') vscode.commands.executeCommand(approveCmd.command, ...(approveCmd.arguments||[]));
+                            else if (choice === 'Reject') vscode.commands.executeCommand(rejectCmd.command, ...(rejectCmd.arguments||[]));
+                    });
+                    // Emit a synthetic outbound fragment so web + chat history show the pending approval context
+                    bus.emitOutbound({ id: req.approvalId, fragment: `Pending approval: ${detail}\n${snippet ? '---\n'+snippet : ''}`, model: 'agent' });
+            });
+    return participant;
 }

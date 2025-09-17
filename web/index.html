@@ -46,6 +46,14 @@ button:disabled { opacity:.5; cursor: not-allowed; }
 .token-number { color:#f6ad55; }
 .token-boolean { color:#ed64a6; }
 .token-null { color:#a0aec0; font-style:italic; }
+/* Approval modal */
+#approvalOverlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index:1100; }
+#approvalModal { background:#1a202c; padding:1rem 1.25rem 1.25rem; border-radius:10px; width:520px; max-width:95%; box-shadow:0 8px 32px rgba(0,0,0,.55); }
+#approvalModal pre { max-height:240px; overflow:auto; font-size:.7rem; }
+#approvalModal h3 { margin:.2rem 0 .6rem; font-size:.95rem; }
+.approveActions { display:flex; gap:.75rem; justify-content:flex-end; margin-top:.9rem; }
+.approveActions button { background:#2b6cb0; }
+.approveActions button.reject { background:#c53030; }
 </style>
 </head>
 <body>
@@ -90,6 +98,19 @@ button:disabled { opacity:.5; cursor: not-allowed; }
     <div id="activeSessionLabel" style="font-size:.75rem; color:#a0aec0; margin-bottom:.4rem;">No session selected</div>
     <div id="log" aria-live="polite"></div>
   </div>
+</div>
+<div id="approvalOverlay">
+    <div id="approvalModal" role="dialog" aria-modal="true" aria-labelledby="approvalTitle">
+        <h3 id="approvalTitle">Pending Approval</h3>
+        <div id="approvalDetails"
+            style="font-size:.75rem; line-height:1.3; white-space:pre-wrap; color:#e2e8f0; margin-bottom:.5rem;"></div>
+        <pre id="approvalDiff" style="display:none;"><code></code></pre>
+        <div class="approveActions">
+            <button id="approveBtn">Approve</button>
+            <button class="reject" id="rejectBtn">Reject</button>
+            <button id="closeApproval" style="background:#4a5568;">Close</button>
+        </div>
+    </div>
 </div>
 <script>
 const host = location.origin; // assumes served from root
@@ -265,6 +286,20 @@ function connectSessionStream() {
       notifyCompletion(data, '');
     }
   });
+    sessionEventSource.addEventListener('approvalRequest', ev => {
+        const data = JSON.parse(ev.data);
+        queueApproval(data);
+    });
+    sessionEventSource.addEventListener('approvalDecision', ev => {
+        const data = JSON.parse(ev.data);
+        // If current displayed matches, close it
+        if (currentApproval && currentApproval.approvalId === data.approvalId) {
+            append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'} (external)`);
+            closeApprovalModal();
+        } else {
+            append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'}`);
+        }
+    });
 }
 
         // Remove noisy agent trace decorations for cleaner final display
@@ -396,6 +431,41 @@ function notifyCompletion(doneData, answer) {
 
     applyDebugVisibility();
     updateNotifyStatus();
+
+        // Approval modal logic
+        const approvalOverlay = document.getElementById('approvalOverlay');
+        const approvalDetails = document.getElementById('approvalDetails');
+        const approvalDiff = document.getElementById('approvalDiff');
+        const approveBtn = document.getElementById('approveBtn');
+        const rejectBtn = document.getElementById('rejectBtn');
+        const closeApproval = document.getElementById('closeApproval');
+        let approvalQueue = [];
+        let currentApproval = null;
+
+        function showApproval(a) {
+            currentApproval = a;
+            approvalDetails.textContent = `${a.action} ${a.path}`;
+            if (a.diff || a.contentPreview) {
+                approvalDiff.style.display = 'block';
+                approvalDiff.querySelector('code').textContent = a.diff || a.contentPreview;
+            } else {
+                approvalDiff.style.display = 'none';
+            }
+            approvalOverlay.style.display = 'flex';
+        }
+        function closeApprovalModal() { approvalOverlay.style.display = 'none'; currentApproval = null; approvalDiff.querySelector('code').textContent = ''; processNextApproval(); }
+        function processNextApproval() { if (!currentApproval && approvalQueue.length) { showApproval(approvalQueue.shift()); } }
+        function queueApproval(a) { approvalQueue.push(a); processNextApproval(); append('info', `Approval requested for ${a.action} ${a.path}`); }
+        approveBtn.addEventListener('click', () => decideApproval(true));
+        rejectBtn.addEventListener('click', () => decideApproval(false));
+        closeApproval.addEventListener('click', closeApprovalModal);
+        approvalOverlay.addEventListener('click', e => { if (e.target === approvalOverlay) closeApprovalModal(); });
+        function decideApproval(ok) {
+            if (!currentApproval) return;
+            fetch(host + '/approval', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approvalId: currentApproval.approvalId, approved: ok }) }).catch(() => { });
+            append('info', `${ok ? 'Approved' : 'Rejected'} ${currentApproval.action} ${currentApproval.path}`);
+            closeApprovalModal();
+        }
 
     // Load full context first, then sessions UI (ensures race-free initial history rendering)
     (async function init() {

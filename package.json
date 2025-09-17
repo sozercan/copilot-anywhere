@@ -86,7 +86,7 @@
                 },
                 "copilotAnywhere.agent.requireApproval": {
                     "type": "boolean",
-                    "default": false,
+                    "default": true,
                     "description": "If true, prompt for user approval before applying each file edit."
                 },
                 "copilotAnywhere.agent.prefix": {

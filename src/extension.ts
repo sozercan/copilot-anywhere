@@ -39,7 +39,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const effectiveAutoInvoke = injectIntoChat ? false : autoInvokeSetting;
   let agentController: AgentController | undefined;
   if (agentEnabled) {
-    const tools = new AgentTools({ workspaceRoot: vscode.workspace.workspaceFolders?.[0].uri.fsPath || context.extensionPath, allowedRoots: agentRoots, requireApproval: agentRequireApproval });
+      const tools = new AgentTools({ workspaceRoot: vscode.workspace.workspaceFolders?.[0].uri.fsPath || context.extensionPath, allowedRoots: agentRoots, requireApproval: agentRequireApproval, bus: { emitApprovalRequest: (r: any) => bus!.emitApprovalRequest(r), onApprovalDecision: (l: any) => bus!.onApprovalDecision(l) } });
     agentController = new AgentController(proxy, tools, bus);
     // Re-register participant with agent (dispose old one first)
     participant.dispose();
@@ -77,6 +77,24 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     });
     context.subscriptions.push(openWeb);
+
+    // Command invoked by chat approval buttons
+    const decideApproval = vscode.commands.registerCommand('copilotAnywhere.approval.decide', async (approvalId: string, approved: boolean) => {
+      try {
+        bus?.emitApprovalDecision({ approvalId, approved });
+        // Also POST to local server if running so web UI stays in sync
+        if (externalServer) {
+          try {
+            const portHost = `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`;
+            await fetch(`${portHost}/approval`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ approvalId, approved }) });
+          } catch { /* ignore */ }
+        }
+        vscode.window.showInformationMessage(`Approval ${approved? 'approved':'rejected'} for ${approvalId}`);
+      } catch (e:any) {
+        vscode.window.showErrorMessage(`Failed to process approval: ${e.message||e}`);
+      }
+    });
+    context.subscriptions.push(decideApproval);
 
   // Listen for HTTP inbound messages and optionally inject into chat UI
   if (injectIntoChat) {

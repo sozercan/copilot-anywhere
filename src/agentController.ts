@@ -37,12 +37,14 @@ FINAL EXAMPLE:
 export class AgentController {
   constructor(
     private proxy: CopilotProxy,
-    private tools: AgentTools,
+      private tools: AgentTools,
     private bus: MessageBus
   ) {}
 
   async run(opts: AgentRunOptions, onStream?: (text: string, done?: boolean) => void): Promise<void> {
     const correlationId = opts.id;
+    // Inform tools of current correlation id for approval mapping
+    (this.tools as any).setCorrelationId?.(correlationId);
     const history: vscode.LanguageModelChatMessage[] = [
       // Use a system message so model treats instructions with higher authority
       (vscode.LanguageModelChatMessage as any).System

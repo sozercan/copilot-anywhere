@@ -187,6 +187,24 @@ export class ExternalServer {
         return;
       }
 
+        if (pathPart === '/approval' && req.method === 'POST') {
+            let body = '';
+            req.on('data', c => body += c);
+            req.on('end', () => {
+                try {
+                    const parsed = JSON.parse(body || '{}');
+                    const approvalId = parsed.approvalId; const approved = !!parsed.approved;
+                    if (!approvalId) { res.writeHead(400); res.end(JSON.stringify({ error: 'approvalId required' })); return; }
+                    this.bus.emitApprovalDecision({ approvalId, approved });
+                    this.broadcast({ event: 'approvalDecision', data: { approvalId, approved } });
+                    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }));
+                } catch (e: any) {
+                    res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+                }
+            });
+            return;
+        }
+
       res.writeHead(404); res.end('Not Found');
     });
 
@@ -284,6 +302,14 @@ export class ExternalServer {
       this.broadcast({ event: 'fragment', data: withSession });
       if (frag.done) this.broadcast({ event: 'done', data: { id: frag.id, model: frag.model, sessionId } });
     });
+
+      // Approval request forwarding
+      this.bus.onApprovalRequest(req => {
+          this.broadcast({ event: 'approvalRequest', data: req });
+      });
+      this.bus.onApprovalDecision(dec => {
+          this.broadcast({ event: 'approvalDecision', data: dec });
+      });
   }
 
   private isOriginAllowed(origin: string): boolean {
