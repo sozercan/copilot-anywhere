@@ -104,7 +104,8 @@ const sendBtn = document.getElementById('sendBtn');
     let debugEnabled = (localStorage.getItem('ca_debug') ?? '1') !== '0';
     let notifyPref = (localStorage.getItem('ca_notify') === '1');
 
-    const debugTypes = new Set(['info', 'fragment', 'done', 'inbound']); // lines considered debug (plus any other non primary types)
+    // Types always visible (not hidden in non-debug mode)
+    const primaryTypes = new Set(['outgoing', 'answer', 'error', 'inbound']);
 
     function applyDebugVisibility() {
         const hidden = !debugEnabled;
@@ -116,7 +117,7 @@ const sendBtn = document.getElementById('sendBtn');
 function append(type, text, extra={}) {
   const line = document.createElement('div');
   line.className = type;
-    const isDebug = debugTypes.has(type) || (!['outgoing', 'answer', 'error'].includes(type));
+    const isDebug = !primaryTypes.has(type); // everything not in primaryTypes treated as debug
     if (isDebug) line.classList.add('debug-line');
   const badge = document.createElement('span');
   badge.className = 'tag';
@@ -130,7 +131,7 @@ function append(type, text, extra={}) {
     ag.textContent = 'AGENT';
     line.appendChild(ag);
   }
-  if (extra.model) {
+    if (extra.model && !(extra.model === 'agent' && extra.agentTag)) {
     const m = document.createElement('span');
     m.className='tag model';
     m.textContent = extra.model;
@@ -256,14 +257,23 @@ function connectSessionStream() {
   append('done', 'Complete for id='+data.id+' (model '+data.model+')', { agentTag: isAgent });
     if (buffer[data.id]) {
       const answerText = buffer[data.id];
-  const isAgent = /\[actions\]/.test(answerText) || /Agent finished|Agent reached max steps/i.test(answerText);
-  append('answer', answerText, { agentTag: isAgent });
+        const isAgent = /\[actions\]/.test(answerText) || /Agent finished|Agent reached max steps/i.test(answerText);
+        const clean = isAgent ? sanitizeAgentAnswer(answerText) : answerText;
+        append('answer', clean, { agentTag: isAgent });
       notifyCompletion(data, answerText);
     } else {
       notifyCompletion(data, '');
     }
   });
 }
+
+        // Remove noisy agent trace decorations for cleaner final display
+        function sanitizeAgentAnswer(text) {
+            let cleaned = text.replace(/\(agent step \d+\/\d+\)/g, '');
+            // Collapse multiple spaces/newlines created by stripping
+            cleaned = cleaned.replace(/\n{3,}/g, '\n\n').replace(/ {2,}/g, ' ');
+            return cleaned.trim();
+        }
 
 async function refreshSessions() {
   try {
@@ -282,15 +292,46 @@ async function refreshSessions() {
       btn.style.margin='0 0 4px';
       btn.style.background = (s.id===currentSession)?'#2b6cb0':'#2d3748';
       btn.style.fontSize='.8rem';
-      btn.addEventListener('click', () => { currentSession = s.id; document.getElementById('log').innerHTML=''; document.getElementById('activeSessionLabel').textContent = 'Session: '+s.name; connectSessionStream(); });
+        btn.addEventListener('click', () => { selectSession(s.id, s.name); });
       container.appendChild(btn);
     });
     // Auto-select first session if none selected
     if (!currentSession && list.length) {
-      currentSession = list[0].id;
-      document.getElementById('activeSessionLabel').textContent = 'Session: '+list[0].name;
-      connectSessionStream();
-    }
+                                    selectSession(list[0].id, list[0].name);
+                                }
+                            } catch { }
+                        }
+
+                        async function selectSession(id, name) {
+                            currentSession = id;
+                            document.getElementById('log').innerHTML = '';
+                            document.getElementById('activeSessionLabel').textContent = 'Session: ' + name;
+                            await replayHistory(id);
+                            connectSessionStream();
+                        }
+
+    async function replayHistory(id) {
+        try {
+            const res = await fetch(host + '/sessions/' + encodeURIComponent(id));
+            if (!res.ok) return;
+            const data = await res.json();
+            const msgs = data.messages || [];
+            if (!msgs.length) {
+                append('info', 'No prior history for this session yet.');
+            }
+            msgs.forEach(m => {
+                if (m.direction === 'inbound') {
+                    append('inbound', m.text || '', { id: m.id });
+                } else if (m.direction === 'outbound') {
+                    if (m.fragment) {
+                        const isAgent = m.model === 'agent' || /(agent step)/.test(m.fragment);
+                        append('fragment', m.fragment, { id: m.id, model: m.model, agentTag: isAgent });
+                        if (m.done) {
+                            append('done', 'Complete for id=' + m.id + ' (model ' + m.model + ')', { agentTag: isAgent });
+                        }
+                    }
+                }
+            });
   } catch {}
 }
 
@@ -346,8 +387,18 @@ function notifyCompletion(doneData, answer) {
     applyDebugVisibility();
     updateNotifyStatus();
 
-refreshSessions();
-connectSessionStream();
+    // Load full context first, then sessions UI (ensures race-free initial history rendering)
+    (async function init() {
+        try {
+            const res = await fetch(host + '/context');
+            if (res.ok) {
+                const data = await res.json();
+                // Pre-populate session list if not already loaded (still call refreshSessions to build buttons)
+                // We rely on refreshSessions for UI; context ensures /sessions/<id> won't 404.
+            }
+        } catch { }
+        await refreshSessions();
+    })();
 </script>
 </body>
 </html>

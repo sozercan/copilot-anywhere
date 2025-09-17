@@ -14,7 +14,7 @@ interface ServerOptions {
 export class ExternalServer {
   private server?: http.Server;
   private sseClients = new Set<http.ServerResponse>();
-  private sessions: Map<string, { id: string; name: string; created: number; messages: (InboundMessage & { sessionId?: string })[] }> = new Map();
+    private sessions: Map<string, { id: string; name: string; created: number; messages: any[] }> = new Map();
   private clientSessionMap: Map<http.ServerResponse, string | undefined> = new Map();
 
   constructor(private options: ServerOptions, private bus: MessageBus, private proxy: any, private output: vscode.OutputChannel, private webRoot?: string, private autoInvoke: boolean = true, private agent?: AgentController, private agentEnabled: boolean = false) {}
@@ -68,10 +68,26 @@ export class ExternalServer {
         return;
       }
 
+        if (pathPart === '/context' && req.method === 'GET') {
+            // Provide full context (all sessions with messages). WARNING: can be large.
+            const payload = Array.from(this.sessions.values()).map(s => ({
+                id: s.id,
+                name: s.name,
+                created: s.created,
+                messages: s.messages
+            }));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ sessions: payload }));
+            return;
+        }
+
       if (pathPart === '/sessions' && req.method === 'POST') { res.writeHead(405); res.end('auto-managed'); return; }
 
       if (pathPart?.startsWith('/sessions/') && req.method === 'GET') {
-        const sid = pathPart.split('/')[2];
+          // Support encoded IDs (absolute paths encoded with encodeURIComponent)
+          const sidRaw = pathPart.substring('/sessions/'.length);
+          let sid: string;
+          try { sid = decodeURIComponent(sidRaw); } catch { sid = sidRaw; }
         const sess = this.sessions.get(sid);
         if (!sess) { res.writeHead(404); res.end('No session'); return; }
         res.writeHead(200, { 'Content-Type': 'application/json'});
@@ -144,12 +160,11 @@ export class ExternalServer {
       // If message has a sessionId, append to that session's history (covers chat-originated messages)
       if (msg.sessionId) {
         let target = this.sessions.get(msg.sessionId);
-        if (!target) {
-          // Create a session placeholder if new folder opened after activation
+          if (!target) {
             this.sessions.set(msg.sessionId, { id: msg.sessionId, name: path.basename(msg.sessionId) || 'session', created: Date.now(), messages: [] });
             target = this.sessions.get(msg.sessionId);
         }
-        target?.messages.push(msg as any);
+          target?.messages.push({ ...msg, direction: 'inbound' });
       }
       this.broadcast({ event: 'inbound', data: msg });
     });
@@ -160,6 +175,12 @@ export class ExternalServer {
         if (sess.messages.find(m => m.id === frag.id)) { sessionId = sess.id; break; }
       }
       const withSession = { ...frag, sessionId };
+        if (sessionId) {
+            const sess = this.sessions.get(sessionId);
+            if (sess) {
+                sess.messages.push({ id: frag.id, fragment: frag.fragment, model: frag.model, done: !!frag.done, direction: 'outbound' });
+            }
+        }
       this.broadcast({ event: 'fragment', data: withSession });
       if (frag.done) this.broadcast({ event: 'done', data: { id: frag.id, model: frag.model, sessionId } });
     });
