@@ -1,132 +1,191 @@
+<div align="center">
+
 # Copilot Anywhere
 
-Bridge GitHub Copilot Chat with external clients (web, mobile, webhook) via an extension-hosted HTTP + Server-Sent Events (SSE) gateway. Send prompts from anywhere; receive streaming AI responses in real-time.
+Always‑on autonomous Copilot Chat agent + local HTTP/SSE bridge + web client.
 
-## ✨ Features
-- Chat Participant that proxies to Copilot chat models
-- External HTTP ingress (`POST /message`) for new prompts
-- Real-time streaming via SSE (`GET /events`)
-- Broadcast of inbound and outbound fragments
-- Simple in-memory message bus
-- Built-in lightweight Web UI at `http://localhost:3939/` (input + live stream)
-- Optional internal autonomous "agent" mode with structured tool calls (read/create/edit files)
+</div>
 
-## 🔌 HTTP API
+## Overview
+Copilot Anywhere turns a VS Code extension into a tiny multi‑surface AI workspace hub:
+
+| Surface | Capability |
+|---------|-----------|
+| VS Code Chat Participant | Always-agent mode: any prompt triggers multi‑step reasoning + file tools |
+| HTTP API (`POST /message`) | Fire prompts from scripts, CI, or other apps |
+| SSE Stream (`GET /events`) | Real‑time inbound, fragment, done, approval, history events |
+| Web UI (`/`) | Project selector, live stream, approvals, notifications |
+
+Core loop: user (or HTTP) sends a goal → agent plans JSON tool actions → tools execute (read/list/create/edit/run) → diffs require approval → summarized final answer + changed files references.
+
+## Current Feature Set
+- Always-on autonomous agent (no prefix or dropdown; every prompt is a goal)
+- Inline chat approval buttons (Approve / Reject) with diff preview
+- Cross-surface approval sync (VS Code <→ Web UI)
+- Session history persistence + replay (tail limited by setting)
+- Synchronized history clearing (`/clear` slash command or HTTP `/clear`)
+- Lightweight web client: streaming log, approval modal, desktop notifications, debug toggle
+- Structured toolset: `readFiles`, `listFiles`, `createFile`, `editFile` (whole-file), `runCommand`
+- Safe roots enforcement + optional approval gating
+- Unified diffs for edit previews (simple line diff)
+
+## Architecture
+```
+┌────────────┐      ┌──────────────────┐      ┌───────────────────────┐
+│ VS Code UI │──┐   │ Message Bus      │   ┌─▶│ External Server (HTTP)│
+└──────┬─────┘  │   └────────┬─────────┘   │  └──────────┬───────────┘
+       │ Chat Participant    │             │             │
+       │ (agent loop)        │             │             │ SSE (events)
+       │                     │             │             ▼
+       │        ┌────────────▼──────┐      │      ┌────────────┐
+       │        │ Agent Controller  │      │      │ Web Client │
+       │        └───────┬──────────┘      │      └────────────┘
+       │                │ Tools           │
+       │                ▼                 │
+       │        (File System / Shell)     │
+       └──────────────────────────────────┘
+```
+
+## Event Stream (SSE `/events`)
+Event names & payload abridged:
+
+- `inbound` `{ id, text, source, sessionId }`
+- `fragment` `{ id, fragment, model, sessionId }` (agent commentary / action + result lines)
+- `done` `{ id, model, sessionId }`
+- `approvalRequest` `{ approvalId, correlationId, action, path, diff?, contentPreview?, sessionId }`
+- `approvalDecision` `{ approvalId, approved, sessionId }`
+- `historyCleared` `{ sessionId, at }`
+
+## HTTP API
 ### POST /message
-Submit a new prompt.
-```
-POST http://localhost:3939/message
-Content-Type: application/json
-
-{ "text": "Explain the meaning of life in one sentence" }
-```
-Response:
-```
-202 Accepted
-{ "accepted": true, "id": "<correlation-id>" }
-```
-
-### GET /events (SSE)
-Receive streaming events.
-Events:
-- `inbound` : `{ id, text, source }`
-- `fragment`: `{ id, fragment, model }`
-- `done` : `{ id, model }`
-
-Example:
-```
-GET http://localhost:3939/events
-```
-Client pseudo-code:
-```js
-const es = new EventSource('http://localhost:3939/events');
-es.addEventListener('fragment', e => {
-  const data = JSON.parse(e.data);
-  console.log('Fragment', data.fragment);
-});
-```
-
-## 🧩 VS Code Chat Usage
-Open the GitHub Copilot Chat view and mention the participant:
-```
-@Copilot Anywhere How do I implement a binary search in TypeScript?
-```
-Streaming responses appear in chat and are forwarded to SSE clients.
-
-## 🛠 Development
-Install deps & compile:
-```
-npm install
-npm run watch
-```
-Press F5 to launch the Extension Development Host.
-
-## ⚙️ Configuration (Settings)
-- `copilotAnywhere.server.port` (default 3939)
-- `copilotAnywhere.server.host` (default 127.0.0.1)
-- `copilotAnywhere.security.allowOrigins` (array, default ["*"])
-- `copilotAnywhere.http.autoInvoke` (boolean, default true) – automatically run model for HTTP-submitted prompts
-- `copilotAnywhere.http.injectIntoChat` (boolean, default true) – instead of autoInvoke, open Copilot Chat and prefill `@CopilotAnywhere <prompt>`
-- `copilotAnywhere.http.autoSubmit` (boolean, default true) – (Currently passive) earlier versions attempted forced submit; now we rely on VS Code auto-submit or manual Enter to avoid duplicates.
-- `copilotAnywhere.agent.enabled` (boolean, default true) – enable internal autonomous agent loop.
-- `copilotAnywhere.agent.maxSteps` (number, default 12) – cap iterative reasoning/tool cycles.
-- `copilotAnywhere.agent.allowedRoots` (array, default ["src","web","README.md"]) – restrict file access.
-- `copilotAnywhere.agent.requireApproval` (boolean, default false) – ask before applying each edit.
-
-## 🔒 Security Notes
-- In development defaults are permissive. Tighten CORS (`allowOrigins`) before exposing externally.
-- Consider adding an auth token header for production.
-
-## 🧪 Quick Test with curl
-# 🤖 Agent Mode
-Enable in settings: `copilotAnywhere.agent.enabled = true`.
-
-Send an agent job:
-```
+Send a new goal (always agent mode):
+```bash
 curl -X POST http://localhost:3939/message \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Create a README section summarizing agent features","mode":"agent"}'
+  -d '{ "text": "Add a CONTRIBUTING.md explaining how to run and build" }'
 ```
-Events you'll see:
-* `inbound` – received request
-* `fragment` – agent commentary & action results
-* `done` – final summary
+Response: `{ "accepted": true, "id": "<correlation-id>", "sessionId": "..." }`
 
-Tools supported now:
-* readFiles { files: [paths] }
-* createFile { path, content }
-* editFile { path, content } (whole-file replace)
+Optional body fields:
+- `sessionId` (absolute workspace folder path) – pick target project (defaults to first folder)
+- `maxSteps` (override agent max steps)
 
-Agent JSON protocol (model output each step):
+### POST /clear
+Clear session history (memory + persistence file):
+```bash
+curl -X POST http://localhost:3939/clear -H 'Content-Type: application/json' \
+  -d '{ "sessionId": "/absolute/path/to/workspace" }'
 ```
-{
-  "actions": [ { "tool": "readFiles", "files": ["src/copilotProxy.ts"] } ],
-  "commentary": "Reading file",
-  "done": false
-}
-```
-Finish:
-```
-{ "finalSummary": "Added new section", "done": true }
-```
-If `requireApproval` is true, a quick pick appears before edits.
+SSE `historyCleared` event broadcasts afterward.
 
-Limitations: diff-based edits not yet supported (model must supply full new content). JSON extraction is simplistic (last object in output). Keep model responses concise.
+### GET /sessions
+List sessions: id, name, created, message count.
 
+### GET /sessions/:id
+Replay full (recent tail) history for a session.
+
+### GET /events
+Subscribe to SSE. Add `?session=<id>` to filter.
+
+## VS Code Chat Usage
+Just type your goal to the participant (no prefix needed). Examples:
+- "Refactor the diff builder to show minimal context"
+- "Add unit tests for the approval flow edge cases"
+- "List files under src that mention approval"
+
+Slash commands:
+- `/files` – list recent agent-changed files
+- `/run <cmd>` – run a shell command in workspace root (still subject to approval if configured)
+- `/clear` – clear synchronized history
+
+Approvals:
+- File create/edit actions emit inline buttons in chat with a truncated diff fenced as `diff`.
+- Web UI shows a modal with full diff/preview.
+- Decisions sync instantly across surfaces and remove pending state.
+
+## Tools (Agent Actions)
+| Tool | Schema (fields) | Notes |
+|------|-----------------|-------|
+| readFiles | `{ tool: 'readFiles', files: string[] }` | Returns full text for allowed files |
+| listFiles | `{ tool: 'listFiles', glob?, max? }` | Simple substring filter, bounded results |
+| createFile | `{ tool: 'createFile', path, content }` | Requires approval if enabled; fails if exists |
+| editFile | `{ tool: 'editFile', path, content }` | Whole-file replace; diff generated for approval |
+| runCommand | `{ tool: 'runCommand', command, cwd?, timeoutMs? }` | QuickPick currently used for approval (future unify) |
+
+## Approval Flow
+1. Agent proposes write action.
+2. Unified diff (or content preview for new file) generated client-side.
+3. `approvalRequest` SSE + inline chat buttons.
+4. User approves/rejects → `approvalDecision` broadcast → pending promise resolves.
+5. Agent continues or reports rejection.
+
+Timeout: 2 minutes auto-reject if no decision.
+
+## History & Persistence
+- Per-session JSONL file (if enabled) stores: inbound, outbound fragments, final aggregated answer.
+- On startup, tail (config max) is reloaded and replayed.
+- `/clear` truncates persisted file and memory list; broadcasts `historyCleared`.
+
+## Settings
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `copilotAnywhere.server.port` | 3939 | HTTP/SSE port |
+| `copilotAnywhere.server.host` | 127.0.0.1 | Host bind (use 0.0.0.0 for LAN) |
+| `copilotAnywhere.security.allowOrigins` | ["*"] | CORS origins (tighten in prod) |
+| `copilotAnywhere.http.autoInvoke` | true | Auto model call for HTTP prompts when agent disabled |
+| `copilotAnywhere.http.injectIntoChat` | false | Inject inbound HTTP text into chat input instead of auto invoke |
+| `copilotAnywhere.http.autoSubmit` | true | (Passive placeholder) |
+| `copilotAnywhere.agent.enabled` | true | Enable autonomous agent loop |
+| `copilotAnywhere.agent.maxSteps` | 12 | Step cap per goal |
+| `copilotAnywhere.agent.allowedRoots` | ["*"] | Relative roots permitted ("*" = all) |
+| `copilotAnywhere.agent.requireApproval` | true | Require approval for create/edit (and runCommand QuickPick) |
+| `copilotAnywhere.persistence.enabled` | true | Enable persistence JSONL logs |
+| `copilotAnywhere.persistence.directory` | (storage path) | Override persistence location |
+| `copilotAnywhere.persistence.maxMessagesPerSession` | 500 | Tail size loaded at startup |
+
+## Quick Start
+```bash
+npm install
+npm run compile
+# Press F5 in VS Code to launch Extension Development Host
 ```
-# Send a prompt
-curl -X POST http://localhost:3939/message -H 'Content-Type: application/json' -d '{"text":"Say hello in French"}'
+Open: http://localhost:3939/ (adjust host/port if reconfigured)
 
-# Listen (in another terminal)
+Send a goal via curl:
+```bash
+curl -X POST http://localhost:3939/message \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Create docs/architecture.md summarizing the agent loop"}'
+```
+Stream events:
+```bash
 curl -N http://localhost:3939/events
 ```
 
-## 🚧 Roadmap / Ideas
-- WebSocket support
-- Persistent session + history reconstruction
-- Auth tokens & rate limiting
-- Multi-model routing and selection
-- Retry / backoff for model errors
+## Limitations / Known Gaps
+- Whole-file edit only (no partial patch application)
+- Simple diff (no context folding or large-file optimization)
+- `runCommand` still uses a QuickPick (not bus-based approval yet)
+- No cancellation of in-progress agent run (planned)
+- No authentication / rate limiting (add before exposing publicly)
+- Session IDs are absolute paths (privacy / noise)
+
+## Roadmap (Short List)
+1. Diff-based incremental edits
+2. Search tool (regex / substring) with bounded results
+3. Cancellation command & token propagation
+4. Granular approval toggles (create vs edit vs command)
+5. Auth & rate limiting for HTTP endpoints
+
+## Development Tips
+- Use `/run` for quick environment probes.
+- `/clear` before demos to reset clutter.
+- Keep agent goals concise; the controller summarizes actions/results automatically.
+- For large edits: agent will show diff preview; refine goal if diff is noisy.
+
+## Security Notes
+- Treat the extension host boundary seriously—only enable `*` CORS in trusted local environments.
+- Consider reverse proxy with auth when remote.
 
 ## License
 MIT (add LICENSE file before publishing)

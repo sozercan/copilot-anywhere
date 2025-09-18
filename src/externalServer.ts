@@ -25,6 +25,12 @@ export class ExternalServer {
     private persistedInboundIds: Set<string> = new Set();
     private pendingOutboundBuffers: Map<string, { fragments: string[]; model?: string; done?: boolean }> = new Map();
     private approvalSessionIndex: Map<string, string | undefined> = new Map();
+    // Track last clear epoch to help clients decide replay invalidation
+    private sessionClearedAt: Map<string, number> = new Map();
+    // Track recent HTTP-origin inbounds to suppress duplicate chat echoes
+    private recentHttpInbounds: { text: string; sessionId?: string; ts: number }[] = [];
+    // Track recent raw HTTP /message submissions to prevent double agent runs (debounce)
+    private recentHttpSubmissions: { text: string; sessionId?: string; ts: number }[] = [];
 
   constructor(private options: ServerOptions, private bus: MessageBus, private proxy: any, private output: vscode.OutputChannel, private webRoot?: string, private autoInvoke: boolean = true, private agent?: AgentController, private agentEnabled: boolean = false) {}
 
@@ -86,6 +92,24 @@ export class ExternalServer {
         return;
       }
 
+        if (pathPart === '/clear' && req.method === 'POST') {
+            let body = '';
+            req.on('data', c => body += c);
+            req.on('end', async () => {
+                try {
+                    const parsed = JSON.parse(body || '{}');
+                    const sessionId = parsed.sessionId as string;
+                    if (!sessionId || !this.sessions.has(sessionId)) { res.writeHead(400); res.end(JSON.stringify({ error: 'valid sessionId required' })); return; }
+                    await this.clearSessionHistory(sessionId);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                } catch (e: any) {
+                    res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+                }
+            });
+            return;
+        }
+
         if (pathPart === '/persistence/status' && req.method === 'GET') {
             const enabled = !!this.options.persistence?.enabled;
             const status = {
@@ -140,27 +164,27 @@ export class ExternalServer {
               res.writeHead(400); res.end(JSON.stringify({ error: 'text required'})); return;
             }
             const msg: InboundMessage & { sessionId?: string } = { id: Date.now().toString(), text, source: 'http', sessionId };
-            if (sessionId) {
-              const sess = this.sessions.get(sessionId);
-                if (sess) {
-                    sess.messages.push(msg);
-                    this.messageSessionIndex.set(msg.id, sessionId);
-                    if (this.options.persistence?.enabled) {
-                        await this.persistMessage(sessionId, { type: 'inbound', ...msg });
-                        this.persistedInboundIds.add(msg.id);
-                    }
-                }
+              // Debounce duplicate HTTP submissions (same text+session within 1500ms)
+              const now = Date.now();
+              this.recentHttpSubmissions = this.recentHttpSubmissions.filter(r => now - r.ts < 2000);
+              const dup = this.recentHttpSubmissions.find(r => r.text === text && r.sessionId === sessionId && now - r.ts < 1500);
+              this.recentHttpSubmissions.push({ text, sessionId, ts: now });
+              let suppressedRun = false;
+              // Do not pre-store; bus.onInbound will handle session linkage & persistence uniformly (prevents duplicates)
+              if (!dup) {
+                  this.bus.emitInbound(msg);
+            } else {
+                suppressedRun = true; // we will skip agent invocation below
             }
-            this.bus.emitInbound(msg);
             res.writeHead(202, { 'Content-Type': 'application/json'});
             res.end(JSON.stringify({ accepted: true, id: msg.id, sessionId }));
-            if (this.agentEnabled && parsed.mode === 'agent' && this.agent) {
+              if (!suppressedRun && this.agentEnabled && parsed.mode === 'agent' && this.agent) {
               try {
                 this.agent.run({ goal: text, id: msg.id, maxSteps: parsed.maxSteps || 12 });
               } catch (e: any) {
                 this.output.appendLine(`[CopilotAnywhere] Agent error: ${e.message || e}`);
               }
-            } else if (this.autoInvoke) {
+            } else if (!suppressedRun && this.autoInvoke) {
               try {
                 await this.proxy.runPromptDirect(text, msg.id);
               } catch (e: any) {
@@ -215,6 +239,20 @@ export class ExternalServer {
 
     // bus listeners
     this.bus.onInbound(msg => {
+        // Deduplicate: if a chat inbound matches a recent HTTP inbound (same session + trimmed text within 4s) skip broadcasting/storage
+        const now = Date.now();
+        // Prune old
+        this.recentHttpInbounds = this.recentHttpInbounds.filter(r => now - r.ts < 5000);
+        if (msg.source === 'http') {
+            this.recentHttpInbounds.push({ text: msg.text.trim(), sessionId: msg.sessionId, ts: now });
+        } else if (msg.source === 'chat') {
+            const t = msg.text.trim();
+            const match = this.recentHttpInbounds.find(r => r.text === t && r.sessionId === msg.sessionId && (now - r.ts) < 4000);
+            if (match) {
+                // Suppress duplicate echo
+                return; // do not store or broadcast
+            }
+        }
       // If message has a sessionId, append to that session's history (covers chat-originated messages)
       if (msg.sessionId) {
         let target = this.sessions.get(msg.sessionId);
@@ -315,6 +353,15 @@ export class ExternalServer {
       const sessionId = this.approvalSessionIndex.get(dec.approvalId);
       this.broadcast({ event: 'approvalDecision', data: { ...dec, sessionId } });
     });
+
+      // Clear history request -> perform clear then emit event
+      this.bus.onClearHistoryRequest(async req => {
+          if (!this.sessions.has(req.sessionId)) return;
+          await this.clearSessionHistory(req.sessionId);
+      });
+      this.bus.onHistoryCleared(evt => {
+          this.broadcast({ event: 'historyCleared', data: evt });
+      });
   }
 
   private isOriginAllowed(origin: string): boolean {
@@ -335,6 +382,18 @@ export class ExternalServer {
       client.write(line);
     }
   }
+
+    private async clearSessionHistory(sessionId: string) {
+        const sess = this.sessions.get(sessionId);
+        if (!sess) return;
+        sess.messages = [];
+        this.sessionClearedAt.set(sessionId, Date.now());
+        // Truncate persistence file (write empty) if enabled
+        if (this.options.persistence?.enabled) {
+            try { await fs.promises.writeFile(this.safeFileName(sessionId), '', 'utf8'); } catch { }
+        }
+        this.bus.emitHistoryCleared({ sessionId, at: Date.now() });
+    }
 
   dispose() {
     for (const client of this.sseClients) client.end();

@@ -9,8 +9,19 @@ import * as path from 'path';
 let lastAgentChangedFiles: string[] = [];
 // Track active agent run correlation ids so we can inline approvals and suppress duplicate global notifications
 const activeAgentRuns = new Set<string>();
+// Track recent HTTP-originated prompts to avoid emitting duplicate inbound when injected into chat
+const recentHttpPrompts: { text: string; ts: number }[] = [];
 
-export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, extensionUri: vscode.Uri, agent?: AgentController, agentPrefix: string = 'agent:') {
+export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, extensionUri: vscode.Uri, agent?: AgentController) {
+    // Listen for HTTP inbound to populate recent list
+    bus.onInbound(msg => {
+        if (msg.source === 'http') {
+            recentHttpPrompts.push({ text: msg.text, ts: Date.now() });
+            // prune older than 5s & keep last 50
+            const cutoff = Date.now() - 5000;
+            while (recentHttpPrompts.length && (recentHttpPrompts[0].ts < cutoff || recentHttpPrompts.length > 50)) recentHttpPrompts.shift();
+        }
+    });
   const handler: vscode.ChatRequestHandler = async (request, context, stream, token) => {
     // Determine sessionId: active editor's workspace folder path, else first workspace folder, else undefined
     let sessionId: string | undefined;
@@ -21,18 +32,36 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
       if (folder) sessionId = folder.uri.fsPath;
     }
     if (!sessionId && folders.length) sessionId = folders[0].uri.fsPath;
-    const inbound: InboundMessage = {
-      id: Date.now().toString(),
-      text: request.prompt,
-      source: 'chat',
-      sessionId
-    };
-    // Forward to bus so external clients also see it
-  bus.emitInbound(inbound);
-    const trimmed = request.prompt.trim();
+      // Detect if this chat prompt is an injected echo of a recent HTTP prompt to avoid duplicate inbound event
+      const rawPrompt = request.prompt;
+      const mentionPrefixMatch = rawPrompt.match(/^@?[A-Za-z0-9._-]+\s+(.*)$/); // capture after participant mention if present
+      const stripped = mentionPrefixMatch ? mentionPrefixMatch[1] : rawPrompt;
+      const trimmed = stripped.trim();
+      let duplicateInbound = false;
+      for (let i = recentHttpPrompts.length - 1; i >= 0; i--) {
+          const rp = recentHttpPrompts[i];
+          if (Date.now() - rp.ts > 4000) break; // beyond window
+          if (rp.text === trimmed) { duplicateInbound = true; break; }
+      }
+      const inbound: InboundMessage = {
+          id: Date.now().toString(),
+            text: rawPrompt,
+            source: 'chat',
+            sessionId
+        };
+      if (!duplicateInbound) {
+          bus.emitInbound(inbound);
+      }
+      const goalBase = trimmed; // maintain previous variable usage semantics
       // Slash command handling
       if (request.command) {
           const cmd = request.command;
+          if (cmd === 'clear') {
+              if (!sessionId) { stream.markdown('No active session to clear.'); return; }
+              bus.emitClearHistoryRequest({ sessionId });
+              stream.markdown(`Clearing history for session: ${path.basename(sessionId)}`);
+              return { metadata: { command: 'clear' } } as any;
+          }
           if (cmd === 'files') {
               if (!lastAgentChangedFiles.length) {
                   stream.markdown('No recent agent file changes tracked in this session.');
@@ -169,24 +198,21 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
             }
       }
 
-      if (agent && trimmed.toLowerCase().startsWith(agentPrefix.toLowerCase())) {
-          let goal = trimmed.slice(agentPrefix.length).trim();
-          if (!goal) {
-              stream.markdown(`Agent prefix detected but no goal provided after '${agentPrefix}'.`);
+      // Always treat as agent goal if agent available (no prefix required)
+      if (agent) {
+          if (!trimmed) { stream.markdown('Empty goal. Provide a description of what you want the agent to do.'); return; }
+          await invokeAgent(trimmed);
           return;
         }
-        await invokeAgent(goal);
-        return; // already handled
-    }
-    // Standard single-turn model proxy
-    try {
-      const response = await proxy.sendToModel(request, context, token, (fragment) => {
-        stream.markdown(fragment);
-      }, inbound.id);
-      return { metadata: { model: response.model } } as any;
-    } catch (err: any) {
-      stream.markdown(`Error: ${err.message || err}`);
-    }
+      // Fallback: if agent disabled, proxy to model
+      try {
+          const response = await proxy.sendToModel(request, context, token, (fragment) => {
+              stream.markdown(fragment);
+          }, inbound.id);
+          return { metadata: { model: response.model } } as any;
+      } catch (err: any) {
+          stream.markdown(`Error: ${err.message || err}`);
+      }
   };
 
     const participant = vscode.chat.createChatParticipant('copilot-anywhere.proxy', handler);
@@ -206,5 +232,9 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
                 });
                 bus.emitOutbound({ id: req.approvalId, fragment: `Pending approval: ${detail}\n${snippet ? '---\n'+snippet : ''}`, model: 'agent' });
             });
+    // Reflect history cleared events in chat (synthetic fragment)
+    bus.onHistoryCleared(evt => {
+        bus.emitOutbound({ id: `history-cleared-${evt.sessionId}-${evt.at}`, fragment: `History cleared for session ${path.basename(evt.sessionId)}`, model: 'system' });
+    });
     return participant;
 }

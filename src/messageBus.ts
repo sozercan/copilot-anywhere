@@ -26,16 +26,23 @@ export interface ApprovalDecision {
     approved: boolean;
 }
 
+export interface ClearHistoryRequest { sessionId: string; }
+export interface HistoryCleared { sessionId: string; at: number; }
+
 export type InboundListener = (msg: InboundMessage) => void;
 export type OutboundListener = (frag: OutboundFragment) => void;
 export type ApprovalRequestListener = (req: ApprovalRequest) => void;
 export type ApprovalDecisionListener = (dec: ApprovalDecision) => void;
+export type ClearHistoryRequestListener = (req: ClearHistoryRequest) => void;
+export type HistoryClearedListener = (evt: HistoryCleared) => void;
 
 export class MessageBus {
   private inboundListeners = new Set<InboundListener>();
   private outboundListeners = new Set<OutboundListener>();
     private approvalRequestListeners = new Set<ApprovalRequestListener>();
     private approvalDecisionListeners = new Set<ApprovalDecisionListener>();
+    private clearHistoryRequestListeners = new Set<ClearHistoryRequestListener>();
+    private historyClearedListeners = new Set<HistoryClearedListener>();
 
   emitInbound(msg: InboundMessage) {
     for (const l of this.inboundListeners) l(msg);
@@ -56,4 +63,14 @@ export class MessageBus {
         for (const l of this.approvalDecisionListeners) l(d);
     }
     onApprovalDecision(l: ApprovalDecisionListener) { this.approvalDecisionListeners.add(l); return () => this.approvalDecisionListeners.delete(l); }
+
+    emitClearHistoryRequest(r: ClearHistoryRequest) {
+        for (const l of this.clearHistoryRequestListeners) l(r);
+    }
+    onClearHistoryRequest(l: ClearHistoryRequestListener) { this.clearHistoryRequestListeners.add(l); return () => this.clearHistoryRequestListeners.delete(l); }
+
+    emitHistoryCleared(evt: HistoryCleared) {
+        for (const l of this.historyClearedListeners) l(evt);
+    }
+    onHistoryCleared(l: HistoryClearedListener) { this.historyClearedListeners.add(l); return () => this.historyClearedListeners.delete(l); }
 }

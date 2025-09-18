@@ -21,8 +21,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const agentEnabled = config.get<boolean>('agent.enabled', false);
   const agentMaxSteps = config.get<number>('agent.maxSteps', 12);
   const agentRoots = config.get<string[]>('agent.allowedRoots', ['src','web','README.md']);
-  const agentRequireApproval = config.get<boolean>('agent.requireApproval', false);
-  const agentPrefix = config.get<string>('agent.prefix', 'agent:');
+    const agentRequireApproval = config.get<boolean>('agent.requireApproval', false);
     const persistenceEnabled = config.get<boolean>('persistence.enabled', true);
     const persistenceDirSetting = config.get<string>('persistence.directory', '');
     const persistenceMax = config.get<number>('persistence.maxMessagesPerSession', 500);
@@ -31,7 +30,7 @@ export async function activate(context: vscode.ExtensionContext) {
   proxy = new CopilotProxy(bus);
 
   // Register chat participant using bus + proxy
-  const participant = registerChatParticipant(bus, proxy, context.extensionUri, undefined, agentPrefix); // agent injected later once created
+    const participant = registerChatParticipant(bus, proxy, context.extensionUri, undefined); // agent injected later once created
   context.subscriptions.push(participant);
 
   // Start external server
@@ -43,7 +42,7 @@ export async function activate(context: vscode.ExtensionContext) {
     agentController = new AgentController(proxy, tools, bus);
     // Re-register participant with agent (dispose old one first)
     participant.dispose();
-    const withAgent = registerChatParticipant(bus, proxy, context.extensionUri, agentController, agentPrefix);
+      const withAgent = registerChatParticipant(bus, proxy, context.extensionUri, agentController);
     context.subscriptions.push(withAgent);
   }
     // Determine persistence directory (config override else global storage)

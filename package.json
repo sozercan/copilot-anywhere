@@ -93,11 +93,6 @@
                     "default": true,
                     "description": "If true, prompt for user approval before applying each file edit."
                 },
-                "copilotAnywhere.agent.prefix": {
-                    "type": "string",
-                    "default": "",
-                    "description": "If a chat prompt to @CopilotAnywhere starts with this prefix, it will invoke the autonomous agent loop instead of a single model response."
-                },
                 "copilotAnywhere.persistence.enabled": {
                     "type": "boolean",
                     "default": true,
@@ -134,6 +129,10 @@
                     {
                         "name": "run",
                         "description": "Run a workspace shell command (agent shortcut)"
+                    },
+                    {
+                        "name": "clear",
+                        "description": "Clear (reset) the current session history across web UI and persistence"
                     }
                 ],
                 "disambiguation": [

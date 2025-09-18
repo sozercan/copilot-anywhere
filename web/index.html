@@ -88,11 +88,7 @@ button:disabled { opacity:.5; cursor: not-allowed; }
   </div>
   <div style="flex:1; min-width:320px;">
     <div id="inputRow">
-      <select id="mode" class="modeSel" title="Mode">
-        <option value="ask">Ask</option>
-        <option value="agent">Agent</option>
-      </select>
-      <input id="prompt" placeholder="Ask anything (Enter to send)" />
+    <input id="prompt" placeholder="Describe what you want the agent to do (Enter to send)" />
       <button id="sendBtn">Send</button>
     </div>
     <div id="activeSessionLabel" style="font-size:.75rem; color:#a0aec0; margin-bottom:.4rem;">No session selected</div>
@@ -118,8 +114,7 @@ let sessionNameMap = {}; // id -> name
 let currentSession = null; // session id
 let sessionEventSource = null;
 const logEl = document.getElementById('log');
-const promptEl = document.getElementById('prompt');
-const modeEl = document.getElementById('mode');
+        const promptEl = document.getElementById('prompt');
 const sendBtn = document.getElementById('sendBtn');
     // Preferences
     let debugEnabled = (localStorage.getItem('ca_debug') ?? '1') !== '0';
@@ -229,12 +224,11 @@ function renderMarkdown(src){
 async function sendPrompt() {
   const value = promptEl.value.trim();
   if (!value) return;
-  const mode = modeEl.value;
-  const outgoingText = mode === 'agent' && !value.toLowerCase().startsWith('agent:') ? 'agent: '+value : value;
+    const outgoingText = value; // always agent mode
   sendBtn.disabled = true;
-  append('outgoing', outgoingText, { agentTag: mode === 'agent' });
+    append('outgoing', outgoingText, { agentTag: true });
   try {
-    const payload = { text: outgoingText, mode: mode === 'agent' ? 'agent' : undefined };
+      const payload = { text: outgoingText, mode: 'agent' };
     if (currentSession) payload.sessionId = currentSession;
     const res = await fetch(host + '/message', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     if (!res.ok) {
@@ -242,7 +236,7 @@ async function sendPrompt() {
       append('error', 'HTTP error: '+t);
     } else {
       const data = await res.json();
-      append('info', 'Sent id='+data.id, { agentTag: mode === 'agent' });
+        append('info', 'Sent id=' + data.id, { agentTag: true });
     }
   } catch (e) {
     append('error', 'Network error '+e);
@@ -261,8 +255,18 @@ function connectSessionStream() {
   const url = currentSession ? `${host}/events?session=${encodeURIComponent(currentSession)}` : `${host}/events`;
   sessionEventSource = new EventSource(url);
   const buffer = {};
+    const seenInbound = new Set();
+    const recentInboundTexts = [];
   sessionEventSource.addEventListener('inbound', ev => {
     const data = JSON.parse(ev.data);
+      const txt = (data.text || '').trim();
+      // Remove stale tracked texts (>30s)
+      const now = Date.now();
+      while (recentInboundTexts.length && now - recentInboundTexts[0].ts > 30000) recentInboundTexts.shift();
+      // If either id seen or identical text within last 3s, skip
+      if (seenInbound.has(data.id) || recentInboundTexts.find(r => r.text === txt && (now - r.ts) < 3000)) return;
+      seenInbound.add(data.id);
+      recentInboundTexts.push({ text: txt, ts: now });
     append('inbound', data.text, { id: data.id });
   });
   sessionEventSource.addEventListener('fragment', ev => {
@@ -292,6 +296,13 @@ function connectSessionStream() {
     queueApproval(data);
   });
   sessionEventSource.addEventListener('approvalDecision', ev => {
+      sessionEventSource.addEventListener('historyCleared', ev => {
+          const data = JSON.parse(ev.data);
+          if (!currentSession || data.sessionId !== currentSession) return; // only act for active session
+          // Clear visible log and show notice
+          logEl.innerHTML = '';
+          append('info', 'History cleared (server sync)');
+      });
     const data = JSON.parse(ev.data);
     if (currentApproval && currentApproval.approvalId === data.approvalId) {
       append('info', `Approval ${data.approvalId} ${data.approved ? 'approved' : 'rejected'}`);
