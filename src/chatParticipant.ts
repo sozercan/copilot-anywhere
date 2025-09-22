@@ -56,6 +56,33 @@ export function registerChatParticipant(bus: MessageBus, proxy: CopilotProxy, ex
       // Slash command handling
       if (request.command) {
           const cmd = request.command;
+          if (cmd === 'diag') {
+              // Gather diagnostics: allowedRoots setting + attempt a listFiles invocation indirectly by inspecting config & filesystem
+              const config = vscode.workspace.getConfiguration('copilotAnywhere');
+              const allowedRoots = config.get<string[]>('agent.allowedRoots') || ['*'];
+              const roots = (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath);
+              // Collect a shallow file sample (non-recursive) for each root for quick visibility
+              const samples: string[] = [];
+              for (const r of roots) {
+                  try {
+                      const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(r));
+                      entries.slice(0, 30).forEach(([name, type]) => {
+                          if (type === vscode.FileType.File) samples.push(`${path.basename(r)}:${name}`);
+                      });
+                  } catch {}
+              }
+              stream.markdown('**Agent Diagnostics**');
+              stream.markdown(`Allowed Roots: \`${JSON.stringify(allowedRoots)}\``);
+              stream.markdown(`Workspace Roots (${roots.length}):`);
+              roots.forEach(r => stream.markdown(`- ${r}`));
+              if (samples.length) {
+                  stream.markdown(`Sample Files (${samples.length}):`);
+                  samples.forEach(s => stream.markdown(`- ${s}`));
+              } else {
+                  stream.markdown('No top-level files found in workspace roots.');
+              }
+              return { metadata: { command: 'diag', sampleCount: samples.length } } as any;
+          }
           if (cmd === 'clear') {
               if (!sessionId) { stream.markdown('No active session to clear.'); return; }
               bus.emitClearHistoryRequest({ sessionId });

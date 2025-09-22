@@ -20,7 +20,15 @@ export async function activate(context: vscode.ExtensionContext) {
   const autoSubmit = config.get<boolean>('http.autoSubmit', true); // retained setting but manual submit loop removed (Option B)
   const agentEnabled = config.get<boolean>('agent.enabled', false);
   const agentMaxSteps = config.get<number>('agent.maxSteps', 12);
-  const agentRoots = config.get<string[]>('agent.allowedRoots', ['src','web','README.md']);
+  // NOTE: Do NOT supply a second parameter here or it will override the contribution default ("*").
+  // Previously we passed ['src','web','README.md'] which prevented the agent from seeing
+  // root-level files (e.g. tetris.py). If the user has not set the value we want the
+  // package.json contributed default of ["*"] to be honored so the whole workspace is accessible.
+  // If the user explicitly narrows roots we still respect that.
+  let agentRoots = config.get<string[]>('agent.allowedRoots');
+  if (!agentRoots || agentRoots.length === 0) {
+    agentRoots = ['*'];
+  }
     const agentRequireApproval = config.get<boolean>('agent.requireApproval', false);
     const persistenceEnabled = config.get<boolean>('persistence.enabled', true);
     const persistenceDirSetting = config.get<string>('persistence.directory', '');
@@ -38,7 +46,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const effectiveAutoInvoke = injectIntoChat ? false : autoInvokeSetting;
   let agentController: AgentController | undefined;
   if (agentEnabled) {
-      const tools = new AgentTools({ workspaceRoot: vscode.workspace.workspaceFolders?.[0].uri.fsPath || context.extensionPath, allowedRoots: agentRoots, requireApproval: agentRequireApproval, bus: { emitApprovalRequest: (r: any) => bus!.emitApprovalRequest(r), onApprovalDecision: (l: any) => bus!.onApprovalDecision(l) } });
+  const allRoots = (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath);
+  const primaryRoot = allRoots[0] || context.extensionPath;
+  const tools = new AgentTools({ workspaceRoot: primaryRoot, workspaceRoots: allRoots, allowedRoots: agentRoots, requireApproval: agentRequireApproval, bus: { emitApprovalRequest: (r: any) => bus!.emitApprovalRequest(r), onApprovalDecision: (l: any) => bus!.onApprovalDecision(l) } });
     agentController = new AgentController(proxy, tools, bus);
     // Re-register participant with agent (dispose old one first)
     participant.dispose();

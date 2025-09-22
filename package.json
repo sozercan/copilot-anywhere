@@ -133,6 +133,10 @@
                     {
                         "name": "clear",
                         "description": "Clear (reset) the current session history across web UI and persistence"
+                    },
+                    {
+                        "name": "diag",
+                        "description": "Show agent file discovery diagnostics (allowedRoots, workspace roots, sample files)"
                     }
                 ],
                 "disambiguation": [

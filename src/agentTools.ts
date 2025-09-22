@@ -14,10 +14,11 @@ export type ToolAction = ReadFilesAction | EditFileAction | CreateFileAction | L
 export interface ToolResult { tool: string; success: boolean; detail?: any; error?: string; }
 
 export interface AgentToolsOptions {
-  workspaceRoot: string;
-  allowedRoots: string[]; // relative allowed roots
+  workspaceRoot: string; // primary (first) workspace folder for relative path resolution
+  workspaceRoots?: string[]; // all workspace folder absolute paths for multi-root support
+  allowedRoots: string[]; // relative allowed roots (applied per root)
   requireApproval: boolean;
-    bus?: { emitApprovalRequest: (r: any) => void; onApprovalDecision: (l: (d: any) => void) => () => void };
+  bus?: { emitApprovalRequest: (r: any) => void; onApprovalDecision: (l: (d: any) => void) => () => void };
 }
 
 export class AgentTools {
@@ -74,11 +75,22 @@ export class AgentTools {
           const act = a as ReadFilesAction;
           const files: any[] = [];
           for (const f of act.files) {
-            const abs = path.join(this.opts.workspaceRoot, f);
-            if (!this.isAllowed(f)) { files.push({ path: f, error: 'Not allowed'}); continue; }
-            if (!fs.existsSync(abs)) { files.push({ path: f, error: 'Not found'}); continue; }
-            const content = fs.readFileSync(abs, 'utf8');
-            files.push({ path: f, content });
+            // Allow explicit root prefix syntax rootName:relative/path for multi-root disambiguation
+            let rel = f;
+            let targetRoots = this.opts.workspaceRoots && this.opts.workspaceRoots.length > 1 ? this.opts.workspaceRoots : [this.opts.workspaceRoot];
+            if (f.includes(':') && this.opts.workspaceRoots && this.opts.workspaceRoots.length > 1) {
+              const [maybeRootName, rest] = f.split(':', 2);
+              const matched = this.opts.workspaceRoots.find(r => path.basename(r) === maybeRootName);
+              if (matched) { targetRoots = [matched]; rel = rest; }
+            }
+            for (const root of targetRoots) {
+              const abs = path.join(root, rel);
+              const relDisplay = targetRoots.length === 1 ? rel : `${path.basename(root)}:${rel}`;
+              if (!this.isAllowed(rel)) { files.push({ path: relDisplay, error: 'Not allowed'}); continue; }
+              if (!fs.existsSync(abs)) { files.push({ path: relDisplay, error: 'Not found'}); continue; }
+              const content = fs.readFileSync(abs, 'utf8');
+              files.push({ path: relDisplay, content });
+            }
           }
           results.push({ tool: 'readFiles', success: true, detail: { files } });
         } else if (a.tool === 'listFiles') {
@@ -86,10 +98,13 @@ export class AgentTools {
           const max = act.max && act.max > 0 ? Math.min(act.max, 500) : 200;
           const glob = act.glob?.toLowerCase();
           const collected: string[] = [];
-          const roots = this.opts.allowedRoots.includes('*') ? [''] : this.opts.allowedRoots.map(r => r.replace(/\\/g,'/'));
+          const relativeRoots = this.opts.allowedRoots.includes('*') ? [''] : this.opts.allowedRoots.map(r => r.replace(/\\/g,'/'));
+          const workspaceRoots = this.opts.workspaceRoots && this.opts.workspaceRoots.length ? this.opts.workspaceRoots : [this.opts.workspaceRoot];
           const walk = (relDir: string) => {
             if (collected.length >= max) return;
-            const absDir = path.join(this.opts.workspaceRoot, relDir);
+            // Iterate every workspace root; prefix collected paths with root folder name if multi-root
+            for (const root of workspaceRoots) {
+              const absDir = path.join(root, relDir);
             let entries: fs.Dirent[] = [];
             try { entries = fs.readdirSync(absDir, { withFileTypes: true }); } catch { return; }
             for (const e of entries) {
@@ -100,17 +115,52 @@ export class AgentTools {
               } else if (e.isFile()) {
                 if (!this.isAllowed(relPath)) continue;
                 if (!glob || relPath.toLowerCase().includes(glob)) {
-                  collected.push(relPath);
+                    if (workspaceRoots.length > 1) {
+                      collected.push(`${path.basename(root)}:${relPath}`);
+                    } else {
+                      collected.push(relPath);
+                    }
                   if (collected.length >= max) break;
                 }
               }
             }
+            }
           };
-          for (const root of roots) {
-            walk(root.replace(/\/$/, ''));
+          for (const rr of relativeRoots) {
+            walk(rr.replace(/\/$/, ''));
             if (collected.length >= max) break;
           }
-          results.push({ tool: 'listFiles', success: true, detail: { files: collected, truncated: collected.length >= max } });
+          // If a glob was used but produced no matches, fall back to a broad scan (no glob) once
+          let fallbackUsed = false;
+          if (glob && collected.length === 0) {
+            const broad: string[] = [];
+            const walkAll = (relDir: string) => {
+              if (broad.length >= max) return;
+              for (const root of workspaceRoots) {
+                const absDir = path.join(root, relDir);
+                let entries: fs.Dirent[] = [];
+                try { entries = fs.readdirSync(absDir, { withFileTypes: true }); } catch { return; }
+                for (const e of entries) {
+                  const relPath = path.posix.join(relDir || '', e.name);
+                  if (e.isDirectory()) { walkAll(relPath); if (broad.length >= max) break; }
+                  else if (e.isFile()) {
+                    if (!this.isAllowed(relPath)) continue;
+                    if (workspaceRoots.length > 1) broad.push(`${path.basename(root)}:${relPath}`); else broad.push(relPath);
+                    if (broad.length >= max) break;
+                  }
+                }
+              }
+            };
+            walkAll('');
+            if (broad.length) { collected.push(...broad); fallbackUsed = true; }
+          }
+          // Provide diagnostics if nothing was found (even after fallback) to help users debug allowedRoots issues
+          const diagnostics = collected.length === 0 ? {
+            workspaceRoots,
+            allowedRoots: this.opts.allowedRoots,
+            note: this.opts.allowedRoots.includes('*') ? 'No files discovered (glob + fallback). Workspace may be empty, files unsaved, or outside workspace.' : 'Consider widening copilotAnywhere.agent.allowedRoots (current config may exclude root files).'
+          } : undefined;
+          results.push({ tool: 'listFiles', success: true, detail: { files: collected, truncated: collected.length >= max, diagnostics, fallbackUsed } });
         } else if (a.tool === 'createFile') {
           const act = a as CreateFileAction;
             if (!this.isAllowed(act.path)) { throw new Error('Not allowed'); }
